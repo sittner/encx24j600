@@ -1,0 +1,58 @@
+/* Overlay for the Microchip ENCx24J600 Ethernet Controller (SPI attached) */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835", "brcm,bcm2836", "brcm,bcm2708", "brcm,bcm2709";
+
+	/* disable spi-dev for spi0.0 */
+	fragment@0 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@2 {
+		target = <&gpio>;
+		__overlay__ {
+			eth1_pins: eth1_pins {
+				brcm,pins = <25>;
+				brcm,function = <0>; /* in */
+				brcm,pull = <0>; /* none */
+			};
+		};
+	};
+
+	fragment@3 {
+		target = <&spi0>;
+		__overlay__ {
+			/* needed to avoid dtc warning */
+			#address-cells = <1>;
+			#size-cells = <0>;
+			eth1: encx24j600@0{
+				compatible = "microchip,encx24j600";
+				reg = <0>; /* CE0 */
+				pinctrl-names = "default";
+				pinctrl-0 = <&eth1_pins>;
+				interrupt-parent = <&gpio>;
+				interrupts = <25 0x8>; /* active low */
+				spi-max-frequency = <14000000>;
+				status = "okay";
+			};
+		};
+	};
+
+	__overrides__ {
+		int_pin = <&eth1>, "interrupts:0",
+		          <&eth1_pins>, "brcm,pins:0";
+		speed   = <&eth1>, "spi-max-frequency:0";
+	};
+};
