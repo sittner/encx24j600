@@ -200,6 +200,7 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
+	size_t block;
 
 	mutex_lock(&ctx->lock);
 
@@ -207,7 +208,16 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 	select_reg(inst, memwin_regs[win]);
 
 	// transfer data (use 8 bit mode)
+    if (priv->ecdev) {
+	// avoid (IRQ dependend) DMA transfers
+	while (count > 0) {
+		block = count > DMA_THRESHOLD_BYTES ? DMA_THRESHOLD_BYTES : count;
+		bcm2835_smi_read_buf(inst, data, block);
+		data += block; count -= block;
+	}
+    } else {
 	bcm2835_smi_read_buf(inst, data, count);
+    }
 
 	mutex_unlock(&ctx->lock);
 }
@@ -216,6 +226,7 @@ static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
+	size_t block;
 
 	mutex_lock(&ctx->lock);
 
@@ -223,7 +234,16 @@ static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 	select_reg(inst, memwin_regs[win]);
 
 	// transfer data (use 8 bit mode)
+    if (priv->ecdev) {
+	// avoid (IRQ dependend) DMA transfers
+	while (count > 0) {
+		block = count > DMA_THRESHOLD_BYTES ? DMA_THRESHOLD_BYTES : count;
+		bcm2835_smi_write_buf(inst, data, block);
+		data += block; count -= block;
+	}
+    } else {
 	bcm2835_smi_write_buf(inst, data, count);
+    }
 
 	mutex_unlock(&ctx->lock);
 }
@@ -319,7 +339,8 @@ static const struct of_device_id encx24j600_smi_id_table[] = {
 	{.compatible = "microchip,encx24j600-smi",},
 	{ /* sentinel */ }
 };
-MODULE_DEVICE_TABLE(of, encx24j600_smi_id_table);
+// prevent automatic loading
+//MODULE_DEVICE_TABLE(of, encx24j600_smi_id_table);
 
 static struct platform_driver encx24j600_smi_driver = {
 	.probe = encx24j600_smi_probe,
@@ -332,6 +353,6 @@ static struct platform_driver encx24j600_smi_driver = {
 };
 module_platform_driver(encx24j600_smi_driver);
 
-MODULE_DESCRIPTION(DRV_NAME " ethernet driver");
+MODULE_DESCRIPTION(DRV_NAME " ethernet driver (EtherCAT)");
 MODULE_AUTHOR("Sascha Ittner <sascha.ittner@modusoft.de>");
 MODULE_LICENSE("GPL");

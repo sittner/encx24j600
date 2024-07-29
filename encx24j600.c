@@ -205,7 +205,12 @@ static void encx24j600_check_link_status(struct encx24j600_priv *priv)
 		if (priv->autoneg == AUTONEG_ENABLE)
 			encx24j600_wait_for_autoneg(priv);
 
+	    if (priv->ecdev) {
+		ecdev_set_link(priv->ecdev, 1);
+	    } else {
 		netif_carrier_on(dev);
+	    }
+
 		netif_info(priv, ifup, dev, "link up\n");
 	} else {
 		netif_info(priv, ifdown, dev, "link down\n");
@@ -216,7 +221,12 @@ static void encx24j600_check_link_status(struct encx24j600_priv *priv)
 		priv->autoneg = AUTONEG_ENABLE;
 		priv->full_duplex = true;
 		priv->speed = SPEED_100;
+
+	    if (priv->ecdev) {
+		ecdev_set_link(priv->ecdev, 0);
+	    } else {
 		netif_carrier_off(dev);
+	    }
 	}
 }
 
@@ -289,8 +299,10 @@ static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
 	priv->tx_pending--;
 
 	atomic_inc(&priv->tx_buf_free);
+    if (!priv->ecdev) {
 	dev_kfree_skb(skb);
 	netif_wake_queue(dev);
+    }
 
 	encx24j600_hw_tx_start(priv);
 }
@@ -301,6 +313,10 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 	struct net_device *dev = priv->ndev;
 	struct sk_buff *skb;
 
+    if (priv->ecdev) {
+	priv->read_mem(priv, WIN_RX, priv->ec_rx_buf, rsv->len);
+	ecdev_receive(priv->ecdev, priv->ec_rx_buf, rsv->len);
+    } else {
 	skb = netdev_alloc_skb(dev, rsv->len + NET_IP_ALIGN);
 	if (!skb) {
 		pr_err_ratelimited("RX: OOM: packet dropped\n");
@@ -317,6 +333,7 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 	skb->protocol = eth_type_trans(skb, dev);
 
 	netif_rx(skb);
+    }
 
 	/* Maintain stats */
 	dev->stats.rx_packets++;
@@ -417,7 +434,9 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 		}
 	}
 
+    if (!priv->ecdev) {
 	enable_irq(dev->irq);
+    }
 }
 
 static int encx24j600_soft_reset(struct encx24j600_priv *priv)
@@ -611,7 +630,9 @@ static void encx24j600_hw_enable(struct encx24j600_priv *priv)
 					 PKTIE | LINKIE));
 
 	/* set global interrupt enable*/
+    if (!priv->ecdev) {
 	priv->set_bits(priv, EIE, INTIE);
+    }
 
 	/* Enable RX */
 	priv->cmd(priv, CMD_ENABLERX);
@@ -720,15 +741,20 @@ static int encx24j600_open(struct net_device *dev)
 	encx24j600_hw_disable(priv);
 	encx24j600_hw_init(priv);
 
+    if (!priv->ecdev) {
 	ret = request_irq(dev->irq, encx24j600_irq, IRQF_TRIGGER_LOW, DRV_NAME, priv);
 	if (unlikely(ret < 0)) {
 		netdev_err(dev, "request irq %d failed (ret = %d)\n",
 			   dev->irq, ret);
 		return ret;
 	}
+    }
 
 	encx24j600_hw_enable(priv);
+
+    if (!priv->ecdev) {
 	netif_start_queue(dev);
+    }
 
 	return 0;
 }
@@ -737,10 +763,20 @@ static int encx24j600_stop(struct net_device *dev)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
 
+    if (!priv->ecdev) {
 	netif_stop_queue(dev);
+    }
 	encx24j600_hw_disable(priv);
+    if (!priv->ecdev) {
 	free_irq(dev->irq, priv);
+    }
 	return 0;
+}
+
+static void encx24j600_ec_poll(struct net_device *dev)
+{
+	struct encx24j600_priv *priv = netdev_priv(dev);
+	encx24j600_irq_proc(&priv->irq_work);
 }
 
 static void encx24j600_setrx_proc(struct kthread_work *ws)
@@ -811,17 +847,26 @@ static netdev_tx_t encx24j600_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
 
+    if (priv->ecdev) {
+	if (atomic_add_unless(&priv->tx_buf_free, -1, 0) == 0)
+		return NETDEV_TX_BUSY;
+    } else {
 	if (atomic_dec_and_test(&priv->tx_buf_free))
 	    netif_stop_queue(dev);
+    }
 
 	/* Remember the skb for deferred processing */
 	priv->tx_buf_input->skb = skb;
 
+    if (priv->ecdev) {
+	encx24j600_hw_tx(priv);
+    } else {
 	/* save the timestamp */
 	netif_trans_update(dev);
 
 	/* start work */
 	kthread_queue_work(&priv->kworker, &priv->tx_buf_input->work);
+    }
 
 	/* skip to next buffer */
 	priv->tx_buf_input = priv->tx_buf_input->next;
@@ -1007,15 +1052,32 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 
 	netif_info(priv, drv, priv->ndev, "MAC address %pM\n", priv->ndev->dev_addr);
 
+	// offer device to EtherCAT master module
+	priv->ecdev = ecdev_offer(priv->ndev, encx24j600_ec_poll, THIS_MODULE);
+    if (priv->ecdev) {
+	priv->ec_rx_buf = kmalloc(TX_BUF_SIZE, GFP_KERNEL);
+	if (!priv->ec_rx_buf) {
+		ret = -ENOMEM;
+		goto out_ecdev_withdraw;
+	}
+
+	ret = ecdev_open(priv->ecdev);
+	if (ret) {
+		goto out_ecdev_withdraw;
+	}
+    } else {
 	ret = register_netdev(priv->ndev);
 	if (unlikely(ret)) {
 		netif_err(priv, probe, priv->ndev,
 			  "Error %d initializing card encx24j600 card\n", ret);
 		goto out_stop;
 	}
+    }
 
 	return ret;
 
+out_ecdev_withdraw:
+	ecdev_withdraw(priv->ecdev);
 out_stop:
 	kthread_stop(priv->kworker_task);
 out_free:
@@ -1023,16 +1085,23 @@ out_free:
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(encx24j600_probe);
+//EXPORT_SYMBOL_GPL(encx24j600_probe);
 
 void encx24j600_remove(struct encx24j600_priv *priv)
 {
+    if (priv->ecdev) {
+	ecdev_close(priv->ecdev);
+	ecdev_withdraw(priv->ecdev);
+	kfree(priv->ec_rx_buf);
+    } else {
 	unregister_netdev(priv->ndev);
+    }
+
 	kthread_stop(priv->kworker_task);
 	free_netdev(priv->ndev);
 }
-EXPORT_SYMBOL_GPL(encx24j600_remove);
+//EXPORT_SYMBOL_GPL(encx24j600_remove);
 
-MODULE_DESCRIPTION(DRV_NAME " ethernet driver");
-MODULE_AUTHOR("Jon Ringle <jringle@gridpoint.com>");
-MODULE_LICENSE("GPL");
+//MODULE_DESCRIPTION(DRV_NAME " ethernet driver (EtherCAT)");
+//MODULE_AUTHOR("Jon Ringle <jringle@gridpoint.com>");
+//MODULE_LICENSE("GPL");
