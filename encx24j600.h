@@ -89,6 +89,6 @@ struct encx24j600_priv {
 };
 
 int encx24j600_probe(struct encx24j600_priv *priv);
-int encx24j600_remove(struct encx24j600_priv *priv);
+void encx24j600_remove(struct encx24j600_priv *priv);
 
 #endif

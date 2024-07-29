@@ -17,8 +17,6 @@
 #include <linux/slab.h>
 #include <linux/ethtool.h>
 #include <linux/skbuff.h>
-#include <linux/sched/rt.h>
-#include <uapi/linux/sched/types.h>
 
 #define DRV_NAME	"encx24j600"
 #define DRV_VERSION	"1.0"
@@ -320,7 +318,7 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 	skb->protocol = eth_type_trans(skb, dev);
 	skb->ip_summed = CHECKSUM_COMPLETE;
 
-	netif_rx_ni(skb);
+	netif_rx(skb);
 
 	/* Maintain stats */
 	dev->stats.rx_packets++;
@@ -710,7 +708,7 @@ static int encx24j600_set_mac_address(struct net_device *dev, void *addr)
 	if (!is_valid_ether_addr(address->sa_data))
 		return -EADDRNOTAVAIL;
 
-	memcpy(dev->dev_addr, address->sa_data, dev->addr_len);
+	eth_hw_addr_set(dev, address->sa_data);
 	return encx24j600_set_hw_macaddr(dev);
 }
 
@@ -832,7 +830,7 @@ static netdev_tx_t encx24j600_tx(struct sk_buff *skb, struct net_device *dev)
 }
 
 /* Deal with a transmit timeout */
-static void encx24j600_tx_timeout(struct net_device *dev)
+static void encx24j600_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
 
@@ -872,29 +870,29 @@ static void encx24j600_get_drvinfo(struct net_device *dev,
 		sizeof(info->bus_info));
 }
 
-static int encx24j600_get_settings(struct net_device *dev,
-				   struct ethtool_cmd *cmd)
+static int encx24j600_get_link_ksettings(struct net_device *dev,
+				   struct ethtool_link_ksettings *cmd)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
 
-	cmd->transceiver = XCVR_INTERNAL;
-	cmd->supported = SUPPORTED_10baseT_Half | SUPPORTED_10baseT_Full |
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported,
+	    SUPPORTED_10baseT_Half | SUPPORTED_10baseT_Full |
 	    SUPPORTED_100baseT_Half | SUPPORTED_100baseT_Full |
-	    SUPPORTED_Autoneg | SUPPORTED_TP;
+	    SUPPORTED_Autoneg | SUPPORTED_TP);;
 
-	ethtool_cmd_speed_set(cmd, priv->speed);
-	cmd->duplex = priv->full_duplex ? DUPLEX_FULL : DUPLEX_HALF;
-	cmd->port = PORT_TP;
-	cmd->autoneg = priv->autoneg ? AUTONEG_ENABLE : AUTONEG_DISABLE;
+	cmd->base.speed = priv->speed;
+	cmd->base.duplex = priv->full_duplex ? DUPLEX_FULL : DUPLEX_HALF;
+	cmd->base.port = PORT_TP;
+	cmd->base.autoneg = priv->autoneg ? AUTONEG_ENABLE : AUTONEG_DISABLE;
 
 	return 0;
 }
 
-static int encx24j600_set_settings(struct net_device *dev,
-				   struct ethtool_cmd *cmd)
+static int encx24j600_set_link_ksettings(struct net_device *dev,
+				   const struct ethtool_link_ksettings *cmd)
 {
-	return encx24j600_setlink(dev, cmd->autoneg,
-				  ethtool_cmd_speed(cmd), cmd->duplex);
+	return encx24j600_setlink(dev, cmd->base.autoneg,
+				  cmd->base.speed, cmd->base.duplex);
 }
 
 static u32 encx24j600_get_msglevel(struct net_device *dev)
@@ -910,8 +908,8 @@ static void encx24j600_set_msglevel(struct net_device *dev, u32 val)
 }
 
 static const struct ethtool_ops encx24j600_ethtool_ops = {
-	.get_settings = encx24j600_get_settings,
-	.set_settings = encx24j600_set_settings,
+	.get_link_ksettings = encx24j600_get_link_ksettings,
+	.set_link_ksettings = encx24j600_set_link_ksettings,
 	.get_drvinfo = encx24j600_get_drvinfo,
 	.get_msglevel = encx24j600_get_msglevel,
 	.set_msglevel = encx24j600_set_msglevel,
@@ -937,7 +935,7 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 	struct encx24j600_tx_buf *last_buf;
 	u16 hw_addr;
 	u16 eidled;
-	struct sched_param sched_param = { .sched_priority = MAX_RT_PRIO / 2 };
+	u8 addr[ETH_ALEN];
 
 	priv->msg_enable = netif_msg_init(debug, DEFAULT_MSG_ENABLE);
 
@@ -997,10 +995,9 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 		goto out_free;
 	}
 
-	sched_setscheduler(priv->kworker_task, SCHED_FIFO, &sched_param);
-
 	/* Get the MAC address from the chip */
-	encx24j600_hw_get_macaddr(priv, priv->ndev->dev_addr);
+	encx24j600_hw_get_macaddr(priv, addr);
+	eth_hw_addr_set(priv->ndev, addr);
 
 	priv->ndev->ethtool_ops = &encx24j600_ethtool_ops;
 
@@ -1031,13 +1028,11 @@ out_free:
 }
 EXPORT_SYMBOL_GPL(encx24j600_probe);
 
-int encx24j600_remove(struct encx24j600_priv *priv)
+void encx24j600_remove(struct encx24j600_priv *priv)
 {
 	unregister_netdev(priv->ndev);
 
 	free_netdev(priv->ndev);
-
-	return 0;
 }
 EXPORT_SYMBOL_GPL(encx24j600_remove);
 

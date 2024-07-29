@@ -25,9 +25,6 @@
 #define SET_OFFSET	0x0100
 #define CLR_OFFSET	0x0180
 
-// TODO: DMA-BUG in SMI-driver?
-#define MAX_BLOCK_SIZE	DMA_THRESHOLD_BYTES
-
 static const u16 memwin_regs[WIN_COUNT] = {
 	EUDADATA,
 	EGPDATA,
@@ -38,7 +35,7 @@ struct encx24j600_smi_ctx {
 	struct encx24j600_priv priv;
 
 	struct bcm2835_smi_instance *smi_inst;
-        struct mutex lock;
+	struct mutex lock;
 };
 
 static inline void select_reg(struct bcm2835_smi_instance *inst, u16 reg)
@@ -203,7 +200,6 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	int block;
 
 	mutex_lock(&ctx->lock);
 
@@ -211,11 +207,7 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 	select_reg(inst, memwin_regs[win]);
 
 	// transfer data (use 8 bit mode)
-	while (count > 0) {
-		block = count > MAX_BLOCK_SIZE ? MAX_BLOCK_SIZE : count;
-		bcm2835_smi_read_buf(inst, data, block);
-		data += block; count -= block;
-	}
+	bcm2835_smi_read_buf(inst, data, count);
 
 	mutex_unlock(&ctx->lock);
 }
@@ -224,7 +216,6 @@ static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	int block;
 
 	mutex_lock(&ctx->lock);
 
@@ -232,11 +223,7 @@ static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 	select_reg(inst, memwin_regs[win]);
 
 	// transfer data (use 8 bit mode)
-	while (count > 0) {
-		block = count > MAX_BLOCK_SIZE ? MAX_BLOCK_SIZE : count;
-		bcm2835_smi_write_buf(inst, data, block);
-		data += block; count -= block;
-	}
+	bcm2835_smi_write_buf(inst, data, count);
 
 	mutex_unlock(&ctx->lock);
 }
@@ -323,7 +310,9 @@ static int encx24j600_smi_remove(struct platform_device *pdev)
 {
 	struct encx24j600_smi_ctx *ctx = platform_get_drvdata(pdev);
 
-	return encx24j600_remove(&ctx->priv);
+	encx24j600_remove(&ctx->priv);
+
+	return 0;
 }
 
 static const struct of_device_id encx24j600_smi_id_table[] = {

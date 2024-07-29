@@ -262,11 +262,11 @@ static int encx24j600_spi_probe(struct spi_device *spi)
 	return encx24j600_probe(&ctx->priv);
 }
 
-static int encx24j600_spi_remove(struct spi_device *spi)
+static void encx24j600_spi_remove(struct spi_device *spi)
 {
 	struct encx24j600_spi_ctx *ctx = dev_get_drvdata(&spi->dev);
 
-	return encx24j600_remove(&ctx->priv);
+	encx24j600_remove(&ctx->priv);
 }
 
 static const struct spi_device_id encx24j600_spi_id_table[] = {
