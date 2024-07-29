@@ -315,7 +315,6 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 
 	skb->dev = dev;
 	skb->protocol = eth_type_trans(skb, dev);
-	skb->ip_summed = CHECKSUM_COMPLETE;
 
 	netif_rx(skb);
 
