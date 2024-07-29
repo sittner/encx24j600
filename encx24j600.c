@@ -155,7 +155,6 @@ static int encx24j600_wait_for_autoneg(struct encx24j600_priv *priv)
 	unsigned long timeout;
 	u16 phstat1;
 	u16 estat;
-	int ret = 0;
 
 	phstat1 = encx24j600_read_phy(priv, PHSTAT1);
 	timeout = jiffies + msecs_to_jiffies(AUTONEG_TIMOUT_MS);
@@ -191,7 +190,7 @@ static int encx24j600_wait_for_autoneg(struct encx24j600_priv *priv)
 		priv->write_reg(priv, MACLCON, 0x370f);
 	}
 
-	return ret;
+	return 0;
 }
 
 /* Access the PHY to determine link status */
@@ -333,6 +332,7 @@ static void encx24j600_rx_packets(struct encx24j600_priv *priv, u8 packet_count)
 
 	while (packet_count--) {
 		struct rsv rsv;
+		u16 newrxtail;
 
 		priv->write_reg(priv, ERXRDPT, priv->next_packet);
 		priv->read_mem(priv, WIN_RX, (u8 *) & rsv, sizeof(rsv));
@@ -361,8 +361,12 @@ static void encx24j600_rx_packets(struct encx24j600_priv *priv, u8 packet_count)
 
 		priv->next_packet = rsv.next_packet;
 
+		newrxtail = priv->next_packet - 2;
+		if (newrxtail == RX_BUF_START)
+			newrxtail = SRAM_SIZE - 2;
+
 		priv->cmd(priv, CMD_SETPKTDEC);
-		priv->write_reg(priv, ERXTAIL, ((rsv.next_packet == RX_BUF_START) ? SRAM_SIZE : rsv.next_packet) - 2);
+		priv->write_reg(priv, ERXTAIL, newrxtail);
 	}
 }
 
@@ -550,9 +554,8 @@ static void encx24j600_set_rxfilter_mode(struct encx24j600_priv *priv)
 	}
 }
 
-static int encx24j600_hw_init(struct encx24j600_priv *priv)
+static void encx24j600_hw_init(struct encx24j600_priv *priv)
 {
-	int ret = 0;
 	u16 macon2;
 
 	priv->hw_enabled = false;
@@ -596,8 +599,6 @@ static int encx24j600_hw_init(struct encx24j600_priv *priv)
 
 	if (netif_msg_hw(priv))
 		encx24j600_dump_config(priv, "Hw is initialized");
-
-	return ret;
 }
 
 static void encx24j600_hw_enable(struct encx24j600_priv *priv)
@@ -864,9 +865,9 @@ static void encx24j600_get_regs(struct net_device *dev,
 static void encx24j600_get_drvinfo(struct net_device *dev,
 				   struct ethtool_drvinfo *info)
 {
-	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
-	strlcpy(info->bus_info, dev_name(dev->dev.parent),
+	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strscpy(info->version, DRV_VERSION, sizeof(info->version));
+	strscpy(info->bus_info, dev_name(dev->dev.parent),
 		sizeof(info->bus_info));
 }
 
@@ -957,12 +958,7 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 	}
 
 	/* Initialize the device HW to the consistent state */
-	if (encx24j600_hw_init(priv)) {
-		netif_err(priv, probe, priv->ndev,
-			  DRV_NAME ": HW initialization error\n");
-		ret = -EIO;
-		goto out_free;
-	}
+	encx24j600_hw_init(priv);
 
 	kthread_init_worker(&priv->kworker);
 	kthread_init_work(&priv->setrx_work, encx24j600_setrx_proc);
@@ -1004,7 +1000,7 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 	eidled = priv->read_reg(priv, EIDLED);
 	if (((eidled & DEVID_MASK) >> DEVID_SHIFT) != ENCX24J600_DEV_ID) {
 		ret = -EINVAL;
-		goto out_free;
+		goto out_stop;
 	}
 
 	netif_info(priv, probe, priv->ndev, "Silicon rev ID: 0x%02x\n",
@@ -1016,11 +1012,13 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 	if (unlikely(ret)) {
 		netif_err(priv, probe, priv->ndev,
 			  "Error %d initializing card encx24j600 card\n", ret);
-		goto out_free;
+		goto out_stop;
 	}
 
 	return ret;
 
+out_stop:
+	kthread_stop(priv->kworker_task);
 out_free:
 	free_netdev(priv->ndev);
 
@@ -1031,7 +1029,7 @@ EXPORT_SYMBOL_GPL(encx24j600_probe);
 void encx24j600_remove(struct encx24j600_priv *priv)
 {
 	unregister_netdev(priv->ndev);
-
+	kthread_stop(priv->kworker_task);
 	free_netdev(priv->ndev);
 }
 EXPORT_SYMBOL_GPL(encx24j600_remove);

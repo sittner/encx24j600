@@ -285,20 +285,9 @@ static struct spi_driver encx24j600_spi_net_driver = {
 	.remove		= encx24j600_spi_remove,
 	.id_table	= encx24j600_spi_id_table,
 };
-
-static int __init encx24j600_spi_init(void)
-{
-	return spi_register_driver(&encx24j600_spi_net_driver);
-}
-module_init(encx24j600_spi_init);
-
-static void encx24j600_spi_exit(void)
-{
-	spi_unregister_driver(&encx24j600_spi_net_driver);
-}
-module_exit(encx24j600_spi_exit);
+module_spi_driver(encx24j600_spi_net_driver);
 
 MODULE_DESCRIPTION(DRV_NAME " ethernet driver");
 MODULE_AUTHOR("Jon Ringle <jringle@gridpoint.com>");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("spi:" DRV_NAME);
+
