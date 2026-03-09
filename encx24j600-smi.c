@@ -305,13 +305,11 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int encx24j600_smi_remove(struct platform_device *pdev)
+static void encx24j600_smi_remove(struct platform_device *pdev)
 {
 	struct encx24j600_smi_ctx *ctx = platform_get_drvdata(pdev);
 
 	encx24j600_remove(&ctx->priv);
-
-	return 0;
 }
 
 static const struct of_device_id encx24j600_smi_id_table[] = {
