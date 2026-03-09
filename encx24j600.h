@@ -88,6 +88,14 @@ struct encx24j600_priv {
 	void (*cmd)(struct encx24j600_priv *priv, enum encx24j600_byte_cmd cmd);
 	void (*read_mem)(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count);
 	void (*write_mem)(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count);
+
+	/* Optional consolidated lock/unlock callbacks. If NULL, no locking is
+	 * done at the encx24j600.c level (backends that cannot consolidate
+	 * locks, like SPI with its per-call sleeping mutex, leave these NULL
+	 * and keep their existing per-call locking).
+	 */
+	void (*lock)(struct encx24j600_priv *priv);
+	void (*unlock)(struct encx24j600_priv *priv);
 };
 
 int encx24j600_probe(struct encx24j600_priv *priv);

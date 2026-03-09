@@ -276,7 +276,8 @@ static void encx24j600_hw_tx_start(struct encx24j600_priv *priv)
 	priv->cmd(priv, CMD_SETTXRTS);
 }
 
-static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
+static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err,
+				   struct sk_buff **skb_to_free, bool *wake_queue)
 {
 	struct net_device *dev = priv->ndev;
 	struct sk_buff *skb = priv->tx_buf_xmit->skb;
@@ -298,8 +299,10 @@ static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
 	priv->tx_pending--;
 
 	atomic_inc(&priv->tx_buf_free);
-	dev_kfree_skb_any(skb);
-	netif_wake_queue(dev);
+
+	/* Defer these operations — they can schedule on PREEMPT_RT */
+	*skb_to_free = skb;
+	*wake_queue = true;
 
 	encx24j600_hw_tx_start(priv);
 }
@@ -325,7 +328,7 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 	skb->dev = dev;
 	skb->protocol = eth_type_trans(skb, dev);
 
-	netif_rx(skb);
+	netif_receive_skb(skb);
 
 	/* Maintain stats */
 	dev->stats.rx_packets++;
@@ -397,20 +400,29 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 	    container_of(ws, struct encx24j600_priv, irq_work);
 
 	struct net_device *dev = priv->ndev;
+	struct sk_buff *skb_to_free = NULL;
+	bool wake_queue = false;
 	int eir;
+
+	if (priv->lock)
+		priv->lock(priv);
 
 	eir = priv->read_reg(priv, EIR);
 	priv->cached_eir = eir;
 
-	/* Process RX first for minimum EtherCAT turnaround latency */
+	/* Process RX first for minimum EtherCAT turnaround latency.
+	 * Only process the packets already pending when the IRQ fired.
+	 * If more packets arrive during processing, the chip will re-assert
+	 * the interrupt, queuing another irq_work item. The kthread_worker
+	 * loop calls schedule() between work items, giving other tasks
+	 * (including userspace) a chance to run.
+	 */
 	if (eir & PKTIF) {
 		u8 packet_count;
 
 		packet_count = priv->read_reg(priv, ESTAT) & 0xff;
-		while (packet_count) {
+		if (packet_count)
 			encx24j600_rx_packets(priv, packet_count);
-			packet_count = priv->read_reg(priv, ESTAT) & 0xff;
-		}
 	}
 
 	if (eir & RXABTIF) {
@@ -424,13 +436,22 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 
 	/* Then TX complete (frees buffer, may trigger next TX) */
 	if (eir & TXABTIF)
-		encx24j600_tx_complete(priv, true);
+		encx24j600_tx_complete(priv, true, &skb_to_free, &wake_queue);
 	else if (eir & TXIF)
-		encx24j600_tx_complete(priv, false);
+		encx24j600_tx_complete(priv, false, &skb_to_free, &wake_queue);
 
 	/* LINK status is least time-critical */
 	if (eir & LINKIF)
 		encx24j600_int_link_handler(priv);
+
+	if (priv->unlock)
+		priv->unlock(priv);
+
+	/* These operations can schedule on PREEMPT_RT, so must be outside the lock */
+	if (skb_to_free)
+		dev_kfree_skb_any(skb_to_free);
+	if (wake_queue)
+		netif_wake_queue(dev);
 
 	enable_irq(dev->irq);
 }
@@ -765,7 +786,13 @@ static void encx24j600_setrx_proc(struct kthread_work *ws)
 	struct encx24j600_priv *priv =
 	    container_of(ws, struct encx24j600_priv, setrx_work);
 
+	if (priv->lock)
+		priv->lock(priv);
+
 	encx24j600_set_rxfilter_mode(priv);
+
+	if (priv->unlock)
+		priv->unlock(priv);
 }
 
 static void encx24j600_set_multicast_list(struct net_device *dev)
@@ -800,6 +827,9 @@ static void encx24j600_hw_tx(struct encx24j600_priv *priv)
 	if (netif_msg_pktdata(priv))
 		dump_packet(dev, "TX", skb->len, skb->data);
 
+	if (priv->lock)
+		priv->lock(priv);
+
 	/* Set the data pointer to the TX buffer address in the SRAM */
 	priv->write_reg(priv, EGPWRPT, priv->tx_buf_prep->hw_addr);
 
@@ -813,6 +843,9 @@ static void encx24j600_hw_tx(struct encx24j600_priv *priv)
 	/* start transmission */
 	priv->cached_eir = priv->read_reg(priv, EIR);
 	encx24j600_hw_tx_start(priv);
+
+	if (priv->unlock)
+		priv->unlock(priv);
 }
 
 static void encx24j600_tx_proc(struct kthread_work *ws)
