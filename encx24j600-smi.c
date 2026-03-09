@@ -166,6 +166,16 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 		case CMD_DISABLERX:
 			write_reg(inst, ECON1 + CLR_OFFSET, RXEN);
 			break;
+		/*
+		 * Note: The SPI bus uses dedicated single-byte opcodes (SETEIE/
+		 * CLREIE) for interrupt enable/disable. Those opcodes are not
+		 * available on the PSP bus. We use the SET/CLR address regions
+		 * for ESTAT instead. Although the datasheet does not explicitly
+		 * document ESTAT SET/CLR access in PSP mode 5, this works because
+		 * INT (bit 15) is the only settable/clearable bit in ESTAT.
+		 * If interrupt enable/disable ever fails intermittently, this is
+		 * the first place to investigate.
+		 */
 		case CMD_SETEIE:
 			write_reg(inst, ESTAT + SET_OFFSET, INT);
 			break;
