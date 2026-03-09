@@ -14,6 +14,7 @@
 #include "encx24j600.h"
 #include "encx24j600_hw.h"
 
+#include <linux/version.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -320,7 +321,11 @@ MODULE_DEVICE_TABLE(of, encx24j600_smi_id_table);
 
 static struct platform_driver encx24j600_smi_driver = {
 	.probe = encx24j600_smi_probe,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 	.remove = encx24j600_smi_remove,
+#else
+	.remove_new = encx24j600_smi_remove,
+#endif
 	.driver = {
 		.name = DRV_NAME,
 		.of_match_table = encx24j600_smi_id_table,
