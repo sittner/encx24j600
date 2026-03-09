@@ -11,15 +11,13 @@
  *
  */
 
-// iperf: 8.9 Mbits/sec
-
 #include "encx24j600.h"
 #include "encx24j600_hw.h"
 
+#include <linux/of.h>
 #include <linux/spi/spi.h>
 
 #define DRV_NAME	"encx24j600-spi"
-#define DRV_VERSION	"1.0"
 
 static const u8 cmd_ops[CMD_COUNT] = {
 	SETETHRST,
@@ -85,10 +83,10 @@ static u16 spi_xfer_nbyte(struct encx24j600_spi_ctx *ctx, u8 reg, u8 op_banked, 
 		{ .tx_buf = &tx, .rx_buf = &rx, .len = 2 },
 	};
 
-	// check if banked transfer is needed
+	/* check if banked transfer is needed */
 	if (reg < 0x80) {
 		u8 reg_banked = reg & BANK_ADDR_MASK;
-		// check for need of bank switch
+		/* check for need of bank switch */
 		if (reg_banked < 0x16) {
 			u8 bank = (reg & BANK_MASK) >> BANK_SHIFT;
 			if (ctx->bank != bank) {
@@ -100,11 +98,11 @@ static u16 spi_xfer_nbyte(struct encx24j600_spi_ctx *ctx, u8 reg, u8 op_banked, 
 			}
 		}
 
-		// setup banked op
+		/* setup banked op */
 		op[0] = op_banked | reg_banked;
 		xfers[0].len = 1;
 	} else {
-		// setup unbanked op
+		/* setup unbanked op */
 		op[0] = op_unbanked;
 		op[1] = reg;
 		xfers[0].len = 2;
@@ -123,7 +121,7 @@ static u16 encx24j600_spi_read_reg(struct encx24j600_priv *priv, u8 reg)
 	u16 val = 0;
 	const struct ptr_op *ptr_op;
 
-	// check for three byte operation
+	/* check for three byte operation */
 	for (ptr_op = ptr_ops; ptr_op->reg != 0; ptr_op++) {
 		if (ptr_op->reg == reg) {
 			struct spi_transfer xfers[] = {
@@ -151,7 +149,7 @@ static void encx24j600_spi_write_reg(struct encx24j600_priv *priv, u8 reg, u16 v
 
 	cpu_to_le16s(&val);
 
-	// check for three byte operation
+	/* check for three byte operation */
 	for (ptr_op = ptr_ops; ptr_op->reg != 0; ptr_op++) {
 		if (ptr_op->reg == reg) {
 			struct spi_transfer xfers[] = {
@@ -243,7 +241,6 @@ static int encx24j600_spi_probe(struct spi_device *spi)
 	ctx->priv.ndev = ndev;
 
 	spi_set_drvdata(spi, ctx);
-	dev_set_drvdata(&spi->dev, ctx);
 	ctx->spi = spi;
 
 	SET_NETDEV_DEV(ndev, &spi->dev);
@@ -275,11 +272,16 @@ static const struct spi_device_id encx24j600_spi_id_table[] = {
 };
 MODULE_DEVICE_TABLE(spi, encx24j600_spi_id_table);
 
+static const struct of_device_id encx24j600_spi_of_match[] = {
+	{ .compatible = "microchip,encx24j600" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, encx24j600_spi_of_match);
+
 static struct spi_driver encx24j600_spi_net_driver = {
 	.driver = {
-		.name	= DRV_NAME,
-		.owner	= THIS_MODULE,
-		.bus	= &spi_bus_type,
+		.name		= DRV_NAME,
+		.of_match_table	= encx24j600_spi_of_match,
 	},
 	.probe		= encx24j600_spi_probe,
 	.remove		= encx24j600_spi_remove,

@@ -20,7 +20,6 @@
 #include <linux/broadcom/bcm2835_smi.h>
 
 #define DRV_NAME	"encx24j600-smi"
-#define DRV_VERSION	"1.0"
 
 #define SET_OFFSET	0x0100
 #define CLR_OFFSET	0x0180
@@ -44,8 +43,8 @@ static inline void select_reg(struct bcm2835_smi_instance *inst, u16 reg)
 	lo = reg & 0xff;
 	hi = (reg >> 8) & 0x01;
 
-	// latch address
-	bcm2835_smi_set_address(inst, hi | 2); // set AS enable
+	/* latch address */
+	bcm2835_smi_set_address(inst, hi | 2); /* set AS enable */
 	bcm2835_smi_write_buf(inst, &lo, 1);
 	bcm2835_smi_set_address(inst, hi);
 }
@@ -203,10 +202,10 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 
 	mutex_lock(&ctx->lock);
 
-	// select window
+	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
-	// transfer data (use 8 bit mode)
+	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_read_buf(inst, data, count);
 
 	mutex_unlock(&ctx->lock);
@@ -219,10 +218,10 @@ static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 
 	mutex_lock(&ctx->lock);
 
-	// select window
+	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
-	// transfer data (use 8 bit mode)
+	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_write_buf(inst, data, count);
 
 	mutex_unlock(&ctx->lock);
@@ -249,21 +248,21 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	// Request use of SMI peripheral
+	/* Request use of SMI peripheral */
 	smi_inst = bcm2835_smi_get(smi_node);
 	if (!smi_inst) {
 		dev_err(&pdev->dev, "Could not register with SMI.");
 		return -EPROBE_DEFER;
 	}
 
-	// get interrupt
+	/* get interrupt */
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
  		dev_err(&pdev->dev, "platform_get_irq failed.\n");
  		return irq;
  	}
 
-	// Set SMI timing and bus width
+	/* Set SMI timing and bus width */
 	smi_settings = bcm2835_smi_get_settings_from_regs(smi_inst);
 
 	smi_settings->data_width = SMI_WIDTH_8BIT;
@@ -326,7 +325,6 @@ static struct platform_driver encx24j600_smi_driver = {
 	.remove = encx24j600_smi_remove,
 	.driver = {
 		.name = DRV_NAME,
-		.owner = THIS_MODULE,
 		.of_match_table = encx24j600_smi_id_table,
 	},
 };
