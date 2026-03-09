@@ -52,26 +52,22 @@ static inline void select_reg(struct bcm2835_smi_instance *inst, u16 reg)
 
 static void write_reg(struct bcm2835_smi_instance *inst, u16 reg, u16 val)
 {
-	u8 lo, hi;
-	lo = val & 0xff;
-	hi = (val >> 8) & 0xff;
+	u8 buf[2];
+	buf[0] = val & 0xff;
+	buf[1] = (val >> 8) & 0xff;
 
 	select_reg(inst, reg);
-	bcm2835_smi_write_buf(inst, &lo, 1);
-	select_reg(inst, reg + 1);
-	bcm2835_smi_write_buf(inst, &hi, 1);
+	bcm2835_smi_write_buf(inst, buf, 2);
 }
 
 static u16 read_reg(struct bcm2835_smi_instance *inst, u16 reg)
 {
-	u8 lo, hi;
+	u8 buf[2];
 
 	select_reg(inst, reg);
-	bcm2835_smi_read_buf(inst, &lo, 1);
-	select_reg(inst, reg + 1);
-	bcm2835_smi_read_buf(inst, &hi, 1);
+	bcm2835_smi_read_buf(inst, buf, 2);
 
-	return lo | (hi << 8);
+	return buf[0] | (buf[1] << 8);
 }
 
 static u16 encx24j600_smi_read_reg(struct encx24j600_priv *priv, u8 reg)
