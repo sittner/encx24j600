@@ -17,6 +17,8 @@
 #include <linux/slab.h>
 #include <linux/ethtool.h>
 #include <linux/skbuff.h>
+#include <linux/sched.h>
+#include <uapi/linux/sched/types.h>
 
 #define DRV_NAME	"encx24j600"
 
@@ -392,13 +394,16 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 
 	eir = priv->read_reg(priv, EIR);
 
-	if (eir & LINKIF)
-		encx24j600_int_link_handler(priv);
+	/* Process RX first for minimum EtherCAT turnaround latency */
+	if (eir & PKTIF) {
+		u8 packet_count;
 
-	if (eir & TXABTIF)
-		encx24j600_tx_complete(priv, true);
-	else if (eir & TXIF)
-		encx24j600_tx_complete(priv, false);
+		packet_count = priv->read_reg(priv, ESTAT) & 0xff;
+		while (packet_count) {
+			encx24j600_rx_packets(priv, packet_count);
+			packet_count = priv->read_reg(priv, ESTAT) & 0xff;
+		}
+	}
 
 	if (eir & RXABTIF) {
 		if (eir & PCFULIF) {
@@ -409,15 +414,15 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 		priv->clr_bits(priv, EIR, RXABTIF);
 	}
 
-	if (eir & PKTIF) {
-		u8 packet_count;
+	/* Then TX complete (frees buffer, may trigger next TX) */
+	if (eir & TXABTIF)
+		encx24j600_tx_complete(priv, true);
+	else if (eir & TXIF)
+		encx24j600_tx_complete(priv, false);
 
-		packet_count = priv->read_reg(priv, ESTAT) & 0xff;
-		while (packet_count) {
-			encx24j600_rx_packets(priv, packet_count);
-			packet_count = priv->read_reg(priv, ESTAT) & 0xff;
-		}
-	}
+	/* LINK status is least time-critical */
+	if (eir & LINKIF)
+		encx24j600_int_link_handler(priv);
 
 	enable_irq(dev->irq);
 }
@@ -987,6 +992,13 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 	if (IS_ERR(priv->kworker_task)) {
 		ret = PTR_ERR(priv->kworker_task);
 		goto out_free;
+	}
+
+	{
+		struct sched_param param = { .sched_priority = MAX_RT_PRIO / 2 };
+		if (sched_setscheduler(priv->kworker_task, SCHED_FIFO, &param))
+			netdev_warn(priv->ndev,
+				    "failed to set RT priority for kworker task\n");
 	}
 
 	/* Get the MAC address from the chip */
