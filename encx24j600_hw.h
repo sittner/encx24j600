@@ -226,7 +226,7 @@
 
 /* MAIPG */
 /* value of the high byte is given by the reserved bits,
- * value of the low byte is recomended setting of the
+ * value of the low byte is recommended setting of the
  * IPG parameter.
  */
 #define MAIPGH_VAL 0x0C
@@ -410,6 +410,6 @@ struct rsv {
 	u16 next_packet;
 	u16 len;
 	u32 rxstat;
-} __attribute__((packed));
+} __packed;
 
 #endif
