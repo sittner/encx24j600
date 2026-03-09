@@ -15,6 +15,9 @@
 #include <linux/etherdevice.h>
 #include <linux/interrupt.h>
 #include <linux/atomic.h>
+#include <linux/bpf.h>
+#include <linux/sched.h>
+#include <net/xdp.h>
 
 #include "encx24j600_hw.h"
 
@@ -50,7 +53,6 @@ struct encx24j600_tx_buf;
 
 struct encx24j600_tx_buf {
 	struct encx24j600_priv *priv;
-	struct kthread_work work;
 	struct sk_buff *skb;
 	u16 hw_addr;
 	struct encx24j600_tx_buf *next;
@@ -73,12 +75,20 @@ struct encx24j600_priv {
 	atomic_t tx_buf_free;
 	bool tx_running;
 	int tx_pending;
+	u32 tx_len;		/* saved TX length for direct-TX completion stats */
 
 	struct encx24j600_tx_buf tx_buf[TX_BUF_COUNT];
 	struct encx24j600_tx_buf *tx_buf_input;
 	struct encx24j600_tx_buf *tx_buf_prep;
 	struct encx24j600_tx_buf *tx_buf_xmit;
 
+	/* XDP support */
+	struct bpf_prog *xdp_prog;
+	struct xdp_rxq_info xdp_rxq;
+	u8 *rx_buf;		/* pre-allocated RX buffer for XDP */
+	size_t rx_buf_size;
+
+	/* Bus operations — public variants acquire the bus mutex */
 	u16 (*read_reg)(struct encx24j600_priv *priv, u8 reg);
 	void (*write_reg)(struct encx24j600_priv *priv, u8 reg, u16 val);
 	void (*clr_bits)(struct encx24j600_priv *priv, u8 reg, u16 mask);
@@ -86,6 +96,19 @@ struct encx24j600_priv {
 	void (*cmd)(struct encx24j600_priv *priv, enum encx24j600_byte_cmd cmd);
 	void (*read_mem)(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count);
 	void (*write_mem)(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count);
+
+	/* Bus lock for atomic multi-register sequences */
+	void (*lock)(struct encx24j600_priv *priv);
+	void (*unlock)(struct encx24j600_priv *priv);
+
+	/* Locked variants — called while bus lock is already held */
+	u16 (*read_reg_locked)(struct encx24j600_priv *priv, u8 reg);
+	void (*write_reg_locked)(struct encx24j600_priv *priv, u8 reg, u16 val);
+	void (*clr_bits_locked)(struct encx24j600_priv *priv, u8 reg, u16 mask);
+	void (*set_bits_locked)(struct encx24j600_priv *priv, u8 reg, u16 mask);
+	void (*cmd_locked)(struct encx24j600_priv *priv, enum encx24j600_byte_cmd cmd);
+	void (*read_mem_locked)(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count);
+	void (*write_mem_locked)(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count);
 };
 
 int encx24j600_probe(struct encx24j600_priv *priv);
