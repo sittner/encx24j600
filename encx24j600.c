@@ -476,6 +476,12 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 		packet_count = priv->read_reg_locked(priv, ESTAT) & 0xff;
 		while (packet_count) {
 			encx24j600_rx_packets(priv, packet_count);
+			/* Release and re-acquire bus lock between batches to
+			 * provide a preemption point for DMA completion IRQs
+			 * on PREEMPT_RT kernels.
+			 */
+			priv->unlock(priv);
+			priv->lock(priv);
 			packet_count = priv->read_reg_locked(priv, ESTAT) & 0xff;
 		}
 	}
