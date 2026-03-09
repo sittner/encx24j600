@@ -19,7 +19,6 @@
 #include <linux/skbuff.h>
 
 #define DRV_NAME	"encx24j600"
-#define DRV_VERSION	"1.0"
 
 #define DEFAULT_MSG_ENABLE (NETIF_MSG_DRV | NETIF_MSG_PROBE | NETIF_MSG_LINK)
 
@@ -29,7 +28,7 @@ MODULE_PARM_DESC(debug, "Debug level (0=none,...,16=all)");
 
 #define RESET_TIMEOUT_US  2000
 #define PHY_TIMEOUT_US    1000
-#define AUTONEG_TIMOUT_MS 2000
+#define AUTONEG_TIMEOUT_MS 2000
 
 enum {
 	RXFILTER_NORMAL,
@@ -37,9 +36,10 @@ enum {
 	RXFILTER_PROMISC
 };
 
-static void dump_packet(const char *msg, int len, const char *data)
+static void dump_packet(struct net_device *dev, const char *msg, int len,
+			const char *data)
 {
-	pr_debug(DRV_NAME ": %s - packet len:%d\n", msg, len);
+	netdev_dbg(dev, "%s - packet len:%d\n", msg, len);
 	print_hex_dump_bytes("pk data: ", DUMP_PREFIX_OFFSET, data, len);
 }
 
@@ -76,26 +76,28 @@ static u16 encx24j600_read_phy(struct encx24j600_priv *priv, u8 reg)
 
 	mutex_lock(&priv->phy_lock);
 
-	// Set the right address and start the register read operation
+	/* Set the right address and start the register read operation */
 	priv->write_reg(priv, MIREGADR, MIREGADR_VAL | (reg & PHREG_MASK));
 	priv->write_reg(priv, MICMD, MIIRD);
 
-	// Loop to wait until the PHY register has been read through the MII
-	// This requires 25.6us
+	/* Loop to wait until the PHY register has been read through the MII
+	 * This requires 25.6us
+	 */
 	usleep_range(26, 100);
 	timeout = jiffies + usecs_to_jiffies(PHY_TIMEOUT_US);
 	while(priv->read_reg(priv, MISTAT) & BUSY) {
 		if (time_after(jiffies, timeout)) {
+			netdev_warn(priv->ndev, "PHY read timeout for reg 0x%02x\n", reg);
 			mutex_unlock(&priv->phy_lock);
 			return 0;
 		}
 		cpu_relax();
 	}
 
-	// Stop reading
+	/* Stop reading */
 	priv->write_reg(priv, MICMD, 0);
-	
-	// Obtain results and return
+
+	/* Obtain results and return */
 	val = priv->read_reg(priv, MIRD);
 
 	mutex_unlock(&priv->phy_lock);
@@ -108,17 +110,18 @@ static void encx24j600_write_phy(struct encx24j600_priv *priv, u8 reg, u16 val)
 
 	mutex_lock(&priv->phy_lock);
 
-	// Write the register address
+	/* Write the register address */
 	priv->write_reg(priv, MIREGADR,  MIREGADR_VAL | (reg & PHREG_MASK));
-	
-	// Write the data
+
+	/* Write the data */
 	priv->write_reg(priv, MIWR, val);
 
-	// Wait until the PHY register has been written
+	/* Wait until the PHY register has been written */
 	usleep_range(26, 100);
 	timeout = jiffies + usecs_to_jiffies(PHY_TIMEOUT_US);
 	while(priv->read_reg(priv, MISTAT) & BUSY) {
 		if (time_after(jiffies, timeout)) {
+			netdev_warn(priv->ndev, "PHY write timeout for reg 0x%02x\n", reg);
 			mutex_unlock(&priv->phy_lock);
 			return;
 		}
@@ -157,7 +160,7 @@ static int encx24j600_wait_for_autoneg(struct encx24j600_priv *priv)
 	u16 estat;
 
 	phstat1 = encx24j600_read_phy(priv, PHSTAT1);
-	timeout = jiffies + msecs_to_jiffies(AUTONEG_TIMOUT_MS);
+	timeout = jiffies + msecs_to_jiffies(AUTONEG_TIMEOUT_MS);
 	while ((phstat1 & ANDONE) == 0) {
 		if (time_after(jiffies, timeout)) {
 			u16 phstat3;
@@ -186,7 +189,7 @@ static int encx24j600_wait_for_autoneg(struct encx24j600_priv *priv)
 	} else {
 		priv->clr_bits(priv, MACON2, FULDPX);
 		priv->write_reg(priv, MABBIPG, 0x12);
-		/* Max retransmittions attempt  */
+		/* Max retransmissions attempt  */
 		priv->write_reg(priv, MACLCON, 0x370f);
 	}
 
@@ -247,15 +250,14 @@ static void encx24j600_reset_hw_tx(struct encx24j600_priv *priv)
 
 static void encx24j600_hw_tx_start(struct encx24j600_priv *priv)
 {
-	struct sk_buff *skb = priv->tx_buf_xmit->skb;
+	struct sk_buff *skb;
 
 	/* transmission still active ? */
-	if (priv->tx_running) {
-	    return;
-	}
+	if (priv->tx_running)
+		return;
 
 	if (priv->read_reg(priv, EIR) & TXABTIF)
-		/* Last transmition aborted due to error. Reset TX interface */
+		/* Last transmission aborted due to error. Reset TX interface */
 		encx24j600_reset_hw_tx(priv);
 
 	/* Clear the TXIF and TXABTIF flag if were previously set */
@@ -263,7 +265,9 @@ static void encx24j600_hw_tx_start(struct encx24j600_priv *priv)
 
 	/* check for packets to send */
 	if (priv->tx_pending <= 0)
-	    return;
+		return;
+
+	skb = priv->tx_buf_xmit->skb;
 
 	/* Program the Tx buffer start pointer */
 	priv->write_reg(priv, ETXST, priv->tx_buf_xmit->hw_addr);
@@ -274,7 +278,6 @@ static void encx24j600_hw_tx_start(struct encx24j600_priv *priv)
 	/* Start the transmission */
 	priv->tx_running = 1;
 	priv->cmd(priv, CMD_SETTXRTS);
-
 }
 
 static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
@@ -286,10 +289,10 @@ static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
 
 	if (err)
 		dev->stats.tx_errors++;
-	else
+	else {
 		dev->stats.tx_packets++;
-
-	dev->stats.tx_bytes += skb->len;
+		dev->stats.tx_bytes += skb->len;
+	}
 
 	netif_dbg(priv, tx_done, dev, "TX Done%s\n", err ? ": Err" : "");
 
@@ -300,7 +303,7 @@ static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
 
 	atomic_inc(&priv->tx_buf_free);
     if (!priv->ecdev) {
-	dev_kfree_skb(skb);
+	dev_kfree_skb_any(skb);
 	netif_wake_queue(dev);
     }
 
@@ -327,7 +330,7 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 	priv->read_mem(priv, WIN_RX, skb_put(skb, rsv->len), rsv->len);
 
 	if (netif_msg_pktdata(priv))
-		dump_packet("RX", skb->len, skb->data);
+		dump_packet(dev, "RX", skb->len, skb->data);
 
 	skb->dev = dev;
 	skb->protocol = eth_type_trans(skb, dev);
@@ -351,7 +354,7 @@ static void encx24j600_rx_packets(struct encx24j600_priv *priv, u8 packet_count)
 		u16 newrxtail;
 
 		priv->write_reg(priv, ERXRDPT, priv->next_packet);
-		priv->read_mem(priv, WIN_RX, (u8 *) & rsv, sizeof(rsv));
+		priv->read_mem(priv, WIN_RX, (u8 *)&rsv, sizeof(rsv));
 		le16_to_cpus(&rsv.next_packet);
 		le16_to_cpus(&rsv.len);
 		le32_to_cpus(&rsv.rxstat);
@@ -409,11 +412,10 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 	if (eir & LINKIF)
 		encx24j600_int_link_handler(priv);
 
-	if (eir & TXIF)
-		encx24j600_tx_complete(priv, false);
-
 	if (eir & TXABTIF)
 		encx24j600_tx_complete(priv, true);
+	else if (eir & TXIF)
+		encx24j600_tx_complete(priv, false);
 
 	if (eir & RXABTIF) {
 		if (eir & PCFULIF) {
@@ -524,33 +526,34 @@ static void encx24j600_hw_init_rx(struct encx24j600_priv *priv)
 static void encx24j600_dump_config(struct encx24j600_priv *priv,
 				   const char *msg)
 {
-	pr_info(DRV_NAME ": %s\n", msg);
+	struct net_device *dev = priv->ndev;
+
+	netdev_dbg(dev, "%s\n", msg);
 
 	/* CHIP configuration */
-	pr_info(DRV_NAME " ECON1:   %04X\n", priv->read_reg(priv, ECON1));
-	pr_info(DRV_NAME " ECON2:   %04X\n", priv->read_reg(priv, ECON2));
-	pr_info(DRV_NAME " ERXFCON: %04X\n", priv->read_reg(priv,
-								 ERXFCON));
-	pr_info(DRV_NAME " ESTAT:   %04X\n", priv->read_reg(priv, ESTAT));
-	pr_info(DRV_NAME " EIR:     %04X\n", priv->read_reg(priv, EIR));
-	pr_info(DRV_NAME " EIDLED:  %04X\n", priv->read_reg(priv, EIDLED));
+	netdev_dbg(dev, "ECON1:   %04X\n", priv->read_reg(priv, ECON1));
+	netdev_dbg(dev, "ECON2:   %04X\n", priv->read_reg(priv, ECON2));
+	netdev_dbg(dev, "ERXFCON: %04X\n", priv->read_reg(priv, ERXFCON));
+	netdev_dbg(dev, "ESTAT:   %04X\n", priv->read_reg(priv, ESTAT));
+	netdev_dbg(dev, "EIR:     %04X\n", priv->read_reg(priv, EIR));
+	netdev_dbg(dev, "EIDLED:  %04X\n", priv->read_reg(priv, EIDLED));
 
 	/* MAC layer configuration */
-	pr_info(DRV_NAME " MACON1:  %04X\n", priv->read_reg(priv, MACON1));
-	pr_info(DRV_NAME " MACON2:  %04X\n", priv->read_reg(priv, MACON2));
-	pr_info(DRV_NAME " MAIPG:   %04X\n", priv->read_reg(priv, MAIPG));
-	pr_info(DRV_NAME " MACLCON: %04X\n", priv->read_reg(priv, MACLCON));
-	pr_info(DRV_NAME " MABBIPG: %04X\n", priv->read_reg(priv, MABBIPG));
+	netdev_dbg(dev, "MACON1:  %04X\n", priv->read_reg(priv, MACON1));
+	netdev_dbg(dev, "MACON2:  %04X\n", priv->read_reg(priv, MACON2));
+	netdev_dbg(dev, "MAIPG:   %04X\n", priv->read_reg(priv, MAIPG));
+	netdev_dbg(dev, "MACLCON: %04X\n", priv->read_reg(priv, MACLCON));
+	netdev_dbg(dev, "MABBIPG: %04X\n", priv->read_reg(priv, MABBIPG));
 
-	/* PHY configuation */
-	pr_info(DRV_NAME " PHCON1:  %04X\n", encx24j600_read_phy(priv, PHCON1));
-	pr_info(DRV_NAME " PHCON2:  %04X\n", encx24j600_read_phy(priv, PHCON2));
-	pr_info(DRV_NAME " PHANA:   %04X\n", encx24j600_read_phy(priv, PHANA));
-	pr_info(DRV_NAME " PHANLPA: %04X\n", encx24j600_read_phy(priv, PHANLPA));
-	pr_info(DRV_NAME " PHANE:   %04X\n", encx24j600_read_phy(priv, PHANE));
-	pr_info(DRV_NAME " PHSTAT1: %04X\n", encx24j600_read_phy(priv, PHSTAT1));
-	pr_info(DRV_NAME " PHSTAT2: %04X\n", encx24j600_read_phy(priv, PHSTAT2));
-	pr_info(DRV_NAME " PHSTAT3: %04X\n", encx24j600_read_phy(priv, PHSTAT3));
+	/* PHY configuration */
+	netdev_dbg(dev, "PHCON1:  %04X\n", encx24j600_read_phy(priv, PHCON1));
+	netdev_dbg(dev, "PHCON2:  %04X\n", encx24j600_read_phy(priv, PHCON2));
+	netdev_dbg(dev, "PHANA:   %04X\n", encx24j600_read_phy(priv, PHANA));
+	netdev_dbg(dev, "PHANLPA: %04X\n", encx24j600_read_phy(priv, PHANLPA));
+	netdev_dbg(dev, "PHANE:   %04X\n", encx24j600_read_phy(priv, PHANE));
+	netdev_dbg(dev, "PHSTAT1: %04X\n", encx24j600_read_phy(priv, PHSTAT1));
+	netdev_dbg(dev, "PHSTAT2: %04X\n", encx24j600_read_phy(priv, PHSTAT2));
+	netdev_dbg(dev, "PHSTAT3: %04X\n", encx24j600_read_phy(priv, PHSTAT3));
 }
 
 static void encx24j600_set_rxfilter_mode(struct encx24j600_priv *priv)
@@ -817,8 +820,7 @@ static void encx24j600_hw_tx(struct encx24j600_priv *priv)
 		   skb->len);
 
 	if (netif_msg_pktdata(priv))
-		dump_packet("TX", skb->len, skb->data);
-
+		dump_packet(dev, "TX", skb->len, skb->data);
 
 	/* Set the data pointer to the TX buffer address in the SRAM */
 	priv->write_reg(priv, EGPWRPT, priv->tx_buf_prep->hw_addr);
@@ -830,7 +832,7 @@ static void encx24j600_hw_tx(struct encx24j600_priv *priv)
 	priv->tx_buf_prep = priv->tx_buf_prep->next;
 	priv->tx_pending++;
 
-	// start transmission
+	/* start transmission */
 	encx24j600_hw_tx_start(priv);
 }
 
@@ -852,7 +854,7 @@ static netdev_tx_t encx24j600_tx(struct sk_buff *skb, struct net_device *dev)
 		return NETDEV_TX_BUSY;
     } else {
 	if (atomic_dec_and_test(&priv->tx_buf_free))
-	    netif_stop_queue(dev);
+		netif_stop_queue(dev);
     }
 
 	/* Remember the skb for deferred processing */
@@ -885,7 +887,6 @@ static void encx24j600_tx_timeout(struct net_device *dev, unsigned int txqueue)
 	dev->stats.tx_errors++;
 	encx24j600_hw_init_tx(priv);
 	netif_wake_queue(dev);
-	return;
 }
 
 static int encx24j600_get_regs_len(struct net_device *dev)
@@ -910,7 +911,6 @@ static void encx24j600_get_drvinfo(struct net_device *dev,
 				   struct ethtool_drvinfo *info)
 {
 	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->version, DRV_VERSION, sizeof(info->version));
 	strscpy(info->bus_info, dev_name(dev->dev.parent),
 		sizeof(info->bus_info));
 }
@@ -923,7 +923,7 @@ static int encx24j600_get_link_ksettings(struct net_device *dev,
 	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported,
 	    SUPPORTED_10baseT_Half | SUPPORTED_10baseT_Full |
 	    SUPPORTED_100baseT_Half | SUPPORTED_100baseT_Full |
-	    SUPPORTED_Autoneg | SUPPORTED_TP);;
+	    SUPPORTED_Autoneg | SUPPORTED_TP);
 
 	cmd->base.speed = priv->speed;
 	cmd->base.duplex = priv->full_duplex ? DUPLEX_FULL : DUPLEX_HALF;
@@ -1012,19 +1012,18 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 	buf = priv->tx_buf;
 	last_buf = NULL;
 	hw_addr = TX_BUF_START;
-	for (i=0; i<TX_BUF_COUNT; i++) {
-	    buf->priv = priv;
-	    kthread_init_work(&buf->work, encx24j600_tx_proc);
-	    buf->skb = NULL;
+	for (i = 0; i < TX_BUF_COUNT; i++) {
+		buf->priv = priv;
+		kthread_init_work(&buf->work, encx24j600_tx_proc);
+		buf->skb = NULL;
 
-	    buf->hw_addr = hw_addr;
-	    hw_addr += TX_BUF_SIZE;
+		buf->hw_addr = hw_addr;
+		hw_addr += TX_BUF_SIZE;
 
-	    if (last_buf != NULL) {
-		last_buf->next = buf;
-	    }
-	    last_buf = buf;
-	    buf++;
+		if (last_buf != NULL)
+			last_buf->next = buf;
+		last_buf = buf;
+		buf++;
 	}
 	last_buf->next = priv->tx_buf;
 

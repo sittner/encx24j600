@@ -20,7 +20,6 @@
 #include <linux/broadcom/bcm2835_smi.h>
 
 #define DRV_NAME	"encx24j600-smi"
-#define DRV_VERSION	"1.0"
 
 #define SET_OFFSET	0x0100
 #define CLR_OFFSET	0x0180
@@ -44,8 +43,8 @@ static inline void select_reg(struct bcm2835_smi_instance *inst, u16 reg)
 	lo = reg & 0xff;
 	hi = (reg >> 8) & 0x01;
 
-	// latch address
-	bcm2835_smi_set_address(inst, hi | 2); // set AS enable
+	/* latch address */
+	bcm2835_smi_set_address(inst, hi | 2); /* set AS enable */
 	bcm2835_smi_write_buf(inst, &lo, 1);
 	bcm2835_smi_set_address(inst, hi);
 }
@@ -116,7 +115,6 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	u16 val;
 
 	mutex_lock(&ctx->lock);
 	switch(cmd) {
@@ -124,26 +122,18 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 			write_reg(inst, ECON2 + SET_OFFSET, ETHRST);
 			break;
 		case CMD_FCDISABLE:
-			val = read_reg(inst, ECON1);
-			val &= ~(FCOP1 | FCOP0);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
 			break;
 		case CMD_FCSINGLE:
-			val = read_reg(inst, ECON1);
-			val &= ~(FCOP1 | FCOP0);
-			val |= FCOP0;
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
+			write_reg(inst, ECON1 + SET_OFFSET, FCOP0);
 			break;
 		case CMD_FCMULTIPLE:
-			val = read_reg(inst, ECON1);
-			val &= ~(FCOP1 | FCOP0);
-			val |= FCOP1;
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
+			write_reg(inst, ECON1 + SET_OFFSET, FCOP1);
 			break;
 		case CMD_FCCLEAR:
-			val = read_reg(inst, ECON1);
-			val |= (FCOP1 | FCOP0);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + SET_OFFSET, FCOP1 | FCOP0);
 			break;
 		case CMD_SETPKTDEC:
 			write_reg(inst, ECON1 + SET_OFFSET, PKTDEC);
@@ -152,28 +142,20 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 			write_reg(inst, ECON1 + CLR_OFFSET, DMAST);
 			break;
 		case CMD_DMACKSUM:
-			val = read_reg(inst, ECON1);
-			val &= ~(DMAST | DMACPY | DMACSSD | DMANOCS);
-			val |= (DMAST);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, DMACPY | DMACSSD | DMANOCS);
+			write_reg(inst, ECON1 + SET_OFFSET, DMAST);
 			break;
 		case CMD_DMACKSUMS:
-			val = read_reg(inst, ECON1);
-			val &= ~(DMAST | DMACPY | DMACSSD | DMANOCS);
-			val |= (DMAST | DMACSSD);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, DMACPY | DMANOCS);
+			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACSSD);
 			break;
 		case CMD_DMACOPY:
-			val = read_reg(inst, ECON1);
-			val &= ~(DMAST | DMACPY | DMACSSD | DMANOCS);
-			val |= (DMAST | DMACPY);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, DMACSSD | DMANOCS);
+			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACPY);
 			break;
 		case CMD_DMACOPYS:
-			val = read_reg(inst, ECON1);
-			val &= ~(DMAST | DMACPY | DMACSSD | DMANOCS);
-			val |= (DMAST | DMACPY | DMACSSD);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, DMANOCS);
+			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACPY | DMACSSD);
 			break;
 		case CMD_SETTXRTS:
 			write_reg(inst, ECON1 + SET_OFFSET, TXRTS);
@@ -184,6 +166,16 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 		case CMD_DISABLERX:
 			write_reg(inst, ECON1 + CLR_OFFSET, RXEN);
 			break;
+		/*
+		 * Note: The SPI bus uses dedicated single-byte opcodes (SETEIE/
+		 * CLREIE) for interrupt enable/disable. Those opcodes are not
+		 * available on the PSP bus. We use the SET/CLR address regions
+		 * for ESTAT instead. Although the datasheet does not explicitly
+		 * document ESTAT SET/CLR access in PSP mode 5, this works because
+		 * INT (bit 15) is the only settable/clearable bit in ESTAT.
+		 * If interrupt enable/disable ever fails intermittently, this is
+		 * the first place to investigate.
+		 */
 		case CMD_SETEIE:
 			write_reg(inst, ESTAT + SET_OFFSET, INT);
 			break;
@@ -196,7 +188,7 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 * data, size_t count)
+static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
@@ -204,7 +196,7 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 
 	mutex_lock(&ctx->lock);
 
-	// select window
+	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
 	// transfer data (use 8 bit mode)
@@ -216,13 +208,14 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 		data += block; count -= block;
 	}
     } else {
+	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_read_buf(inst, data, count);
     }
 
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 * data, size_t count)
+static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
@@ -230,7 +223,7 @@ static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 
 	mutex_lock(&ctx->lock);
 
-	// select window
+	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
 	// transfer data (use 8 bit mode)
@@ -242,6 +235,7 @@ static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 		data += block; count -= block;
 	}
     } else {
+	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_write_buf(inst, data, count);
     }
 
@@ -252,7 +246,7 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 {
 	struct device_node *node, *smi_node;
 	struct bcm2835_smi_instance *smi_inst;
-	int irq;
+	int irq, ret;
 	struct smi_settings *smi_settings;
 	struct net_device *ndev;
 	struct encx24j600_smi_ctx *ctx;
@@ -269,21 +263,22 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	// Request use of SMI peripheral
+	/* Request use of SMI peripheral */
 	smi_inst = bcm2835_smi_get(smi_node);
+	of_node_put(smi_node);
 	if (!smi_inst) {
 		dev_err(&pdev->dev, "Could not register with SMI.");
 		return -EPROBE_DEFER;
 	}
 
-	// get interrupt
+	/* get interrupt */
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
  		dev_err(&pdev->dev, "platform_get_irq failed.\n");
  		return irq;
  	}
 
-	// Set SMI timing and bus width
+	/* Set SMI timing and bus width */
 	smi_settings = bcm2835_smi_get_settings_from_regs(smi_inst);
 
 	smi_settings->data_width = SMI_WIDTH_8BIT;
@@ -296,7 +291,7 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 	smi_settings->write_setup_time = 2;
 	smi_settings->write_hold_time = 2;
 	smi_settings->write_pace_time = 5;
-	smi_settings->write_strobe_time = 2;
+	smi_settings->write_strobe_time = 4;
 
 	bcm2835_smi_set_regs_from_settings(smi_inst);
 
@@ -323,16 +318,20 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 	ctx->priv.read_mem = encx24j600_smi_read_mem;
 	ctx->priv.write_mem = encx24j600_smi_write_mem;
 
-	return encx24j600_probe(&ctx->priv);
+	ret = encx24j600_probe(&ctx->priv);
+	if (ret) {
+		free_netdev(ndev);
+		return ret;
+	}
+
+	return 0;
 }
 
-static int encx24j600_smi_remove(struct platform_device *pdev)
+static void encx24j600_smi_remove(struct platform_device *pdev)
 {
 	struct encx24j600_smi_ctx *ctx = platform_get_drvdata(pdev);
 
 	encx24j600_remove(&ctx->priv);
-
-	return 0;
 }
 
 static const struct of_device_id encx24j600_smi_id_table[] = {
@@ -347,7 +346,6 @@ static struct platform_driver encx24j600_smi_driver = {
 	.remove = encx24j600_smi_remove,
 	.driver = {
 		.name = DRV_NAME,
-		.owner = THIS_MODULE,
 		.of_match_table = encx24j600_smi_id_table,
 	},
 };

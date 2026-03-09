@@ -86,8 +86,8 @@ struct encx24j600_priv {
 	void (*clr_bits)(struct encx24j600_priv *priv, u8 reg, u16 mask);
 	void (*set_bits)(struct encx24j600_priv *priv, u8 reg, u16 mask);
 	void (*cmd)(struct encx24j600_priv *priv, enum encx24j600_byte_cmd cmd);
-	void (*read_mem)(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 * data, size_t count);
-	void (*write_mem)(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 * data, size_t count);
+	void (*read_mem)(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count);
+	void (*write_mem)(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count);
 
 	ec_device_t *ecdev;
 	void *ec_rx_buf;
