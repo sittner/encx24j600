@@ -197,16 +197,6 @@ static void encx24j600_spi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_spi_irq_mask(struct encx24j600_priv *priv)
-{
-	disable_irq_nosync(priv->ndev->irq);
-}
-
-static void encx24j600_spi_irq_unmask(struct encx24j600_priv *priv)
-{
-	enable_irq(priv->ndev->irq);
-}
-
 static void encx24j600_spi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
 {
 	struct encx24j600_spi_ctx *ctx = container_of(priv, struct encx24j600_spi_ctx, priv);
@@ -266,8 +256,6 @@ static int encx24j600_spi_probe(struct spi_device *spi)
 	ctx->priv.cmd = encx24j600_spi_cmd;
 	ctx->priv.read_mem = encx24j600_spi_read_mem;
 	ctx->priv.write_mem = encx24j600_spi_write_mem;
-	ctx->priv.irq_mask = encx24j600_spi_irq_mask;
-	ctx->priv.irq_unmask = encx24j600_spi_irq_unmask;
 
 	ret = encx24j600_probe(&ctx->priv);
 	if (ret) {

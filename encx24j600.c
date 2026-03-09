@@ -385,7 +385,7 @@ static irqreturn_t encx24j600_irq(int irq, void *dev_id)
 {
 	struct encx24j600_priv *priv = dev_id;
 
-	priv->irq_mask(priv);
+	disable_irq_nosync(irq);
 	kthread_queue_work(&priv->kworker, &priv->irq_work);
 
 	return IRQ_HANDLED;
@@ -432,7 +432,7 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 	if (eir & LINKIF)
 		encx24j600_int_link_handler(priv);
 
-	priv->irq_unmask(priv);
+	enable_irq(dev->irq);
 }
 
 static int encx24j600_soft_reset(struct encx24j600_priv *priv)
