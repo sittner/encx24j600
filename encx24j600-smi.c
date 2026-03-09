@@ -192,25 +192,14 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	size_t block;
 
 	mutex_lock(&ctx->lock);
 
 	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
-	// transfer data (use 8 bit mode)
-    if (priv->ecdev) {
-	// avoid (IRQ dependend) DMA transfers
-	while (count > 0) {
-		block = count > DMA_THRESHOLD_BYTES ? DMA_THRESHOLD_BYTES : count;
-		bcm2835_smi_read_buf(inst, data, block);
-		data += block; count -= block;
-	}
-    } else {
 	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_read_buf(inst, data, count);
-    }
 
 	mutex_unlock(&ctx->lock);
 }
@@ -219,25 +208,14 @@ static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	size_t block;
 
 	mutex_lock(&ctx->lock);
 
 	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
-	// transfer data (use 8 bit mode)
-    if (priv->ecdev) {
-	// avoid (IRQ dependend) DMA transfers
-	while (count > 0) {
-		block = count > DMA_THRESHOLD_BYTES ? DMA_THRESHOLD_BYTES : count;
-		bcm2835_smi_write_buf(inst, data, block);
-		data += block; count -= block;
-	}
-    } else {
 	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_write_buf(inst, data, count);
-    }
 
 	mutex_unlock(&ctx->lock);
 }
