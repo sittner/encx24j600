@@ -18,6 +18,7 @@
 #include <linux/ethtool.h>
 #include <linux/skbuff.h>
 #include <linux/sched.h>
+#include <linux/cpumask.h>
 
 #define DRV_NAME	"encx24j600"
 
@@ -26,6 +27,10 @@
 static int debug = -1;
 module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "Debug level (0=none,...,16=all)");
+
+static int kworker_cpu = -1;
+module_param(kworker_cpu, int, 0);
+MODULE_PARM_DESC(kworker_cpu, "CPU core to pin kworker thread to (-1=no pinning)");
 
 #define RESET_TIMEOUT_US  2000
 #define PHY_TIMEOUT_US    1000
@@ -247,7 +252,7 @@ static void encx24j600_hw_tx_start(struct encx24j600_priv *priv)
 	if (priv->tx_running)
 		return;
 
-	if (priv->read_reg(priv, EIR) & TXABTIF)
+	if (priv->cached_eir & TXABTIF)
 		/* Last transmission aborted due to error. Reset TX interface */
 		encx24j600_reset_hw_tx(priv);
 
@@ -332,10 +337,10 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 static void encx24j600_rx_packets(struct encx24j600_priv *priv, u8 packet_count)
 {
 	struct net_device *dev = priv->ndev;
+	u16 newrxtail = 0;
 
 	while (packet_count--) {
 		struct rsv rsv;
-		u16 newrxtail;
 
 		priv->write_reg(priv, ERXRDPT, priv->next_packet);
 		priv->read_mem(priv, WIN_RX, (u8 *)&rsv, sizeof(rsv));
@@ -369,15 +374,18 @@ static void encx24j600_rx_packets(struct encx24j600_priv *priv, u8 packet_count)
 			newrxtail = SRAM_SIZE - 2;
 
 		priv->cmd(priv, CMD_SETPKTDEC);
-		priv->write_reg(priv, ERXTAIL, newrxtail);
 	}
+
+	/* Single tail pointer update after processing all packets */
+	if (newrxtail)
+		priv->write_reg(priv, ERXTAIL, newrxtail);
 }
 
 static irqreturn_t encx24j600_irq(int irq, void *dev_id)
 {
 	struct encx24j600_priv *priv = dev_id;
 
-	disable_irq_nosync(irq);
+	priv->irq_mask(priv);
 	kthread_queue_work(&priv->kworker, &priv->irq_work);
 
 	return IRQ_HANDLED;
@@ -392,6 +400,7 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 	int eir;
 
 	eir = priv->read_reg(priv, EIR);
+	priv->cached_eir = eir;
 
 	/* Process RX first for minimum EtherCAT turnaround latency */
 	if (eir & PKTIF) {
@@ -423,7 +432,7 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 	if (eir & LINKIF)
 		encx24j600_int_link_handler(priv);
 
-	enable_irq(dev->irq);
+	priv->irq_unmask(priv);
 }
 
 static int encx24j600_soft_reset(struct encx24j600_priv *priv)
@@ -484,6 +493,7 @@ static void encx24j600_hw_init_tx(struct encx24j600_priv *priv)
 	priv->tx_buf_xmit = priv->tx_buf;
 	priv->tx_running = 0;
 	priv->tx_pending = 0;
+	priv->cached_eir = 0;
 }
 
 static void encx24j600_hw_init_rx(struct encx24j600_priv *priv)
@@ -801,6 +811,7 @@ static void encx24j600_hw_tx(struct encx24j600_priv *priv)
 	priv->tx_pending++;
 
 	/* start transmission */
+	priv->cached_eir = priv->read_reg(priv, EIR);
 	encx24j600_hw_tx_start(priv);
 }
 
@@ -995,6 +1006,14 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 
 	/* Set RT scheduling for low-latency EtherCAT packet processing */
 	sched_set_fifo(priv->kworker_task);
+
+	if (kworker_cpu >= 0 && kworker_cpu < nr_cpu_ids &&
+	    cpu_online(kworker_cpu))
+		set_cpus_allowed_ptr(priv->kworker_task, cpumask_of(kworker_cpu));
+	else if (kworker_cpu >= 0)
+		netif_warn(priv, drv, priv->ndev,
+			   "kworker_cpu=%d is not available, ignoring CPU affinity\n",
+			   kworker_cpu);
 
 	/* Get the MAC address from the chip */
 	encx24j600_hw_get_macaddr(priv, addr);

@@ -211,6 +211,16 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
+static void encx24j600_smi_irq_mask(struct encx24j600_priv *priv)
+{
+	priv->cmd(priv, CMD_CLREIE);
+}
+
+static void encx24j600_smi_irq_unmask(struct encx24j600_priv *priv)
+{
+	priv->cmd(priv, CMD_SETEIE);
+}
+
 static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
@@ -303,6 +313,8 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 	ctx->priv.cmd = encx24j600_smi_cmd;
 	ctx->priv.read_mem = encx24j600_smi_read_mem;
 	ctx->priv.write_mem = encx24j600_smi_write_mem;
+	ctx->priv.irq_mask = encx24j600_smi_irq_mask;
+	ctx->priv.irq_unmask = encx24j600_smi_irq_unmask;
 
 	ret = encx24j600_probe(&ctx->priv);
 	if (ret) {
