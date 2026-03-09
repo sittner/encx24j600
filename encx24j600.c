@@ -18,7 +18,6 @@
 #include <linux/ethtool.h>
 #include <linux/skbuff.h>
 #include <linux/sched.h>
-#include <uapi/linux/sched/types.h>
 
 #define DRV_NAME	"encx24j600"
 
@@ -994,12 +993,8 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 		goto out_free;
 	}
 
-	{
-		struct sched_param param = { .sched_priority = MAX_RT_PRIO / 2 };
-		if (sched_setscheduler(priv->kworker_task, SCHED_FIFO, &param))
-			netdev_warn(priv->ndev,
-				    "failed to set RT priority for kworker task\n");
-	}
+	/* Set RT scheduling for low-latency EtherCAT packet processing */
+	sched_set_fifo(priv->kworker_task);
 
 	/* Get the MAC address from the chip */
 	encx24j600_hw_get_macaddr(priv, addr);
