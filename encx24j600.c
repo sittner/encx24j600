@@ -14,9 +14,13 @@
 #include "encx24j600.h"
 #include "encx24j600_hw.h"
 
+#include <linux/bpf.h>
+#include <linux/filter.h>
 #include <linux/slab.h>
 #include <linux/ethtool.h>
 #include <linux/skbuff.h>
+#include <linux/sched.h>
+#include <net/xdp.h>
 
 #define DRV_NAME	"encx24j600"
 
@@ -238,38 +242,6 @@ static void encx24j600_reset_hw_tx(struct encx24j600_priv *priv)
 	priv->clr_bits(priv, ECON2, TXRST);
 }
 
-static void encx24j600_hw_tx_start(struct encx24j600_priv *priv)
-{
-	struct sk_buff *skb;
-
-	/* transmission still active ? */
-	if (priv->tx_running)
-		return;
-
-	if (priv->read_reg(priv, EIR) & TXABTIF)
-		/* Last transmission aborted due to error. Reset TX interface */
-		encx24j600_reset_hw_tx(priv);
-
-	/* Clear the TXIF and TXABTIF flag if were previously set */
-	priv->clr_bits(priv, EIR, TXIF | TXABTIF);
-
-	/* check for packets to send */
-	if (priv->tx_pending <= 0)
-		return;
-
-	skb = priv->tx_buf_xmit->skb;
-
-	/* Program the Tx buffer start pointer */
-	priv->write_reg(priv, ETXST, priv->tx_buf_xmit->hw_addr);
-
-	/* Program the packet length */
-	priv->write_reg(priv, ETXLEN, skb->len);
-
-	/* Start the transmission */
-	priv->tx_running = 1;
-	priv->cmd(priv, CMD_SETTXRTS);
-}
-
 static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
 {
 	struct net_device *dev = priv->ndev;
@@ -281,21 +253,22 @@ static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
 		dev->stats.tx_errors++;
 	else {
 		dev->stats.tx_packets++;
-		dev->stats.tx_bytes += skb->len;
+		/* Use saved length if skb was already freed (direct TX path) */
+		dev->stats.tx_bytes += skb ? skb->len : priv->tx_len;
 	}
 
 	netif_dbg(priv, tx_done, dev, "TX Done%s\n", err ? ": Err" : "");
 
-	/* skip to next buffer */
-	priv->tx_buf_xmit->skb = NULL;
-	priv->tx_buf_xmit = priv->tx_buf_xmit->next;
-	priv->tx_pending--;
+	if (skb) {
+		/* Ring-based TX path: advance ring pointer and free skb */
+		priv->tx_buf_xmit->skb = NULL;
+		priv->tx_buf_xmit = priv->tx_buf_xmit->next;
+		priv->tx_pending--;
+		atomic_inc(&priv->tx_buf_free);
+		dev_kfree_skb_any(skb);
+	}
 
-	atomic_inc(&priv->tx_buf_free);
-	dev_kfree_skb_any(skb);
 	netif_wake_queue(dev);
-
-	encx24j600_hw_tx_start(priv);
 }
 
 static int encx24j600_receive_packet(struct encx24j600_priv *priv,
@@ -303,18 +276,93 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 {
 	struct net_device *dev = priv->ndev;
 	struct sk_buff *skb;
+	u8 *rx_buf = priv->rx_buf;
+	u8 *data;
+	size_t len = rsv->len;
 
-	skb = netdev_alloc_skb(dev, rsv->len + NET_IP_ALIGN);
+	/* Ensure rx_buf is available */
+	if (!rx_buf) {
+		rx_buf = netdev_alloc_frag(priv->rx_buf_size);
+		if (!rx_buf) {
+			pr_err_ratelimited("RX: OOM: packet dropped\n");
+			dev->stats.rx_dropped++;
+			return -ENOMEM;
+		}
+		priv->rx_buf = rx_buf;
+	}
+
+	/* Read packet data into rx_buf at XDP headroom offset */
+	data = rx_buf + XDP_PACKET_HEADROOM;
+	priv->read_mem_locked(priv, WIN_RX, data, len);
+
+	if (netif_msg_pktdata(priv))
+		dump_packet(dev, "RX", len, data);
+
+	if (priv->xdp_prog) {
+		struct xdp_buff xdp;
+		u32 act;
+
+		xdp_init_buff(&xdp, priv->rx_buf_size, &priv->xdp_rxq);
+		xdp_prepare_buff(&xdp, rx_buf, XDP_PACKET_HEADROOM, len, false);
+
+		act = bpf_prog_run_xdp(priv->xdp_prog, &xdp);
+
+		switch (act) {
+		case XDP_PASS:
+			/* Update data pointer and length in case XDP modified them */
+			data = xdp.data;
+			len = xdp.data_end - xdp.data;
+			break;
+		case XDP_DROP:
+			dev->stats.rx_dropped++;
+			return 0;
+		case XDP_TX:
+			/* Retransmit the (potentially modified) frame.
+			 * The bus lock is already held by encx24j600_irq_proc;
+			 * use _locked variants directly — no nested lock/unlock.
+			 */
+			if (priv->tx_running) {
+				/* TX already in flight; cannot retransmit now */
+				dev->stats.rx_dropped++;
+				return 0;
+			}
+			if (priv->read_reg_locked(priv, EIR) & TXABTIF) {
+				priv->set_bits_locked(priv, ECON2, TXRST);
+				priv->clr_bits_locked(priv, ECON2, TXRST);
+			}
+			priv->clr_bits_locked(priv, EIR, TXIF | TXABTIF);
+			priv->write_reg_locked(priv, EGPWRPT, TX_BUF_START);
+			priv->write_mem_locked(priv, WIN_GP, xdp.data,
+					       xdp.data_end - xdp.data);
+			priv->write_reg_locked(priv, ETXST, TX_BUF_START);
+			priv->write_reg_locked(priv, ETXLEN,
+					       xdp.data_end - xdp.data);
+			priv->tx_running = 1;
+			priv->tx_len = xdp.data_end - xdp.data;
+			priv->cmd_locked(priv, CMD_SETTXRTS);
+			/* TX stats are updated in encx24j600_tx_complete() */
+			return 0;
+		default:
+			bpf_warn_invalid_xdp_action(dev, priv->xdp_prog, act);
+			dev->stats.rx_dropped++;
+			return 0;
+		}
+	}
+
+	/* Build skb from pre-allocated buffer (zero-copy path) */
+	skb = build_skb(rx_buf, priv->rx_buf_size);
 	if (!skb) {
 		pr_err_ratelimited("RX: OOM: packet dropped\n");
 		dev->stats.rx_dropped++;
 		return -ENOMEM;
 	}
-	skb_reserve(skb, NET_IP_ALIGN);
-	priv->read_mem(priv, WIN_RX, skb_put(skb, rsv->len), rsv->len);
+	skb_reserve(skb, data - rx_buf);
+	skb_put(skb, len);
 
-	if (netif_msg_pktdata(priv))
-		dump_packet(dev, "RX", skb->len, skb->data);
+	/* Allocate a fresh rx_buf for the next received packet */
+	priv->rx_buf = netdev_alloc_frag(priv->rx_buf_size);
+	if (!priv->rx_buf)
+		netdev_warn(dev, "RX: failed to allocate new rx_buf\n");
 
 	skb->dev = dev;
 	skb->protocol = eth_type_trans(skb, dev);
@@ -336,8 +384,8 @@ static void encx24j600_rx_packets(struct encx24j600_priv *priv, u8 packet_count)
 		struct rsv rsv;
 		u16 newrxtail;
 
-		priv->write_reg(priv, ERXRDPT, priv->next_packet);
-		priv->read_mem(priv, WIN_RX, (u8 *)&rsv, sizeof(rsv));
+		priv->write_reg_locked(priv, ERXRDPT, priv->next_packet);
+		priv->read_mem_locked(priv, WIN_RX, (u8 *)&rsv, sizeof(rsv));
 		le16_to_cpus(&rsv.next_packet);
 		le16_to_cpus(&rsv.len);
 		le32_to_cpus(&rsv.rxstat);
@@ -367,8 +415,8 @@ static void encx24j600_rx_packets(struct encx24j600_priv *priv, u8 packet_count)
 		if (newrxtail == RX_BUF_START)
 			newrxtail = SRAM_SIZE - 2;
 
-		priv->cmd(priv, CMD_SETPKTDEC);
-		priv->write_reg(priv, ERXTAIL, newrxtail);
+		priv->cmd_locked(priv, CMD_SETPKTDEC);
+		priv->write_reg_locked(priv, ERXTAIL, newrxtail);
 	}
 }
 
@@ -390,10 +438,23 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 	struct net_device *dev = priv->ndev;
 	int eir;
 
+	/* Single unlocked read — cheap and avoids holding the lock across
+	 * the link-status check below (which calls PHY ops with their own lock).
+	 */
 	eir = priv->read_reg(priv, EIR);
 
+	/* Handle link change outside the bus lock: encx24j600_check_link_status
+	 * calls encx24j600_wait_for_autoneg which polls PHY registers under
+	 * phy_lock and uses the public (mutex-acquiring) bus ops.  Nesting the
+	 * bus lock around that would deadlock.
+	 */
 	if (eir & LINKIF)
 		encx24j600_int_link_handler(priv);
+
+	/* Hold the bus lock across all remaining register accesses to eliminate
+	 * per-register mutex overhead (~5-20 µs per lock/unlock cycle).
+	 */
+	priv->lock(priv);
 
 	if (eir & TXABTIF)
 		encx24j600_tx_complete(priv, true);
@@ -406,18 +467,20 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 			netif_err(priv, rx_err, dev, "Packet counter full\n");
 		}
 		dev->stats.rx_dropped++;
-		priv->clr_bits(priv, EIR, RXABTIF);
+		priv->clr_bits_locked(priv, EIR, RXABTIF);
 	}
 
 	if (eir & PKTIF) {
 		u8 packet_count;
 
-		packet_count = priv->read_reg(priv, ESTAT) & 0xff;
+		packet_count = priv->read_reg_locked(priv, ESTAT) & 0xff;
 		while (packet_count) {
 			encx24j600_rx_packets(priv, packet_count);
-			packet_count = priv->read_reg(priv, ESTAT) & 0xff;
+			packet_count = priv->read_reg_locked(priv, ESTAT) & 0xff;
 		}
 	}
+
+	priv->unlock(priv);
 
 	enable_irq(dev->irq);
 }
@@ -723,26 +786,70 @@ static int encx24j600_open(struct net_device *dev)
 	encx24j600_hw_disable(priv);
 	encx24j600_hw_init(priv);
 
-	ret = request_irq(dev->irq, encx24j600_irq, IRQF_TRIGGER_LOW, DRV_NAME, priv);
+	/* Allocate pre-allocated RX buffer for XDP zero-copy path */
+	priv->rx_buf_size = PAGE_SIZE;
+	priv->rx_buf = netdev_alloc_frag(priv->rx_buf_size);
+	if (!priv->rx_buf) {
+		netdev_err(dev, "failed to allocate RX buffer\n");
+		return -ENOMEM;
+	}
+
+	/* Register XDP RX queue info */
+	ret = xdp_rxq_info_reg(&priv->xdp_rxq, dev, 0, 0);
+	if (ret) {
+		netdev_err(dev, "failed to register XDP RX queue: %d\n", ret);
+		goto err_free_rx_buf;
+	}
+
+	ret = xdp_rxq_info_reg_mem_model(&priv->xdp_rxq,
+					 MEM_TYPE_PAGE_SHARED, NULL);
+	if (ret) {
+		netdev_err(dev, "failed to register XDP memory model: %d\n",
+			   ret);
+		goto err_unreg_xdp;
+	}
+
+	ret = request_irq(dev->irq, encx24j600_irq, IRQF_TRIGGER_LOW,
+			  DRV_NAME, priv);
 	if (unlikely(ret < 0)) {
 		netdev_err(dev, "request irq %d failed (ret = %d)\n",
 			   dev->irq, ret);
-		return ret;
+		goto err_unreg_xdp;
 	}
 
 	encx24j600_hw_enable(priv);
 	netif_start_queue(dev);
 
 	return 0;
+
+err_unreg_xdp:
+	xdp_rxq_info_unreg(&priv->xdp_rxq);
+err_free_rx_buf:
+	skb_free_frag(priv->rx_buf);
+	priv->rx_buf = NULL;
+	return ret;
 }
 
 static int encx24j600_stop(struct net_device *dev)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
+	struct bpf_prog *prog;
 
 	netif_stop_queue(dev);
 	encx24j600_hw_disable(priv);
 	free_irq(dev->irq, priv);
+
+	xdp_rxq_info_unreg(&priv->xdp_rxq);
+
+	if (priv->rx_buf) {
+		skb_free_frag(priv->rx_buf);
+		priv->rx_buf = NULL;
+	}
+
+	prog = xchg(&priv->xdp_prog, NULL);
+	if (prog)
+		bpf_prog_put(prog);
+
 	return 0;
 }
 
@@ -775,58 +882,59 @@ static void encx24j600_set_multicast_list(struct net_device *dev)
 		kthread_queue_work(&priv->kworker, &priv->setrx_work);
 }
 
-static void encx24j600_hw_tx(struct encx24j600_priv *priv)
-{
-	struct net_device *dev = priv->ndev;
-	struct sk_buff *skb = priv->tx_buf_prep->skb;
-
-	netif_info(priv, tx_queued, dev, "TX Packet Len:%d\n",
-		   skb->len);
-
-	if (netif_msg_pktdata(priv))
-		dump_packet(dev, "TX", skb->len, skb->data);
-
-	/* Set the data pointer to the TX buffer address in the SRAM */
-	priv->write_reg(priv, EGPWRPT, priv->tx_buf_prep->hw_addr);
-
-	/* Copy the packet into the SRAM */
-	priv->write_mem(priv, WIN_GP, (u8 *) skb->data, skb->len);
-
-	/* skip to next buffer */
-	priv->tx_buf_prep = priv->tx_buf_prep->next;
-	priv->tx_pending++;
-
-	/* start transmission */
-	encx24j600_hw_tx_start(priv);
-}
-
-static void encx24j600_tx_proc(struct kthread_work *ws)
-{
-	struct encx24j600_tx_buf *buf =
-	    container_of(ws, struct encx24j600_tx_buf, work);
-	struct encx24j600_priv *priv = buf->priv;
-
-	encx24j600_hw_tx(priv);
-}
-
 static netdev_tx_t encx24j600_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
 
-	if (atomic_dec_and_test(&priv->tx_buf_free))
-		netif_stop_queue(dev);
-
-	/* Remember the skb for deferred processing */
-	priv->tx_buf_input->skb = skb;
-
-	/* save the timestamp */
+	/* Stop queue for single-packet EtherCAT mode */
+	netif_stop_queue(dev);
 	netif_trans_update(dev);
 
-	/* start work */
-	kthread_queue_work(&priv->kworker, &priv->tx_buf_input->work);
+	if (netif_msg_tx_queued(priv))
+		netif_info(priv, tx_queued, dev, "TX Packet Len:%d\n", skb->len);
 
-	/* skip to next buffer */
-	priv->tx_buf_input = priv->tx_buf_input->next;
+	if (netif_msg_pktdata(priv))
+		dump_packet(dev, "TX", skb->len, skb->data);
+
+	/* Save packet length for TX completion stats */
+	priv->tx_len = skb->len;
+
+	/* Perform the entire TX sequence under a single bus lock to
+	 * eliminate per-register mutex overhead (~5-20µs per lock/unlock).
+	 */
+	priv->lock(priv);
+
+	/* Reset TX hardware if the previous transmission was aborted */
+	if (priv->read_reg_locked(priv, EIR) & TXABTIF) {
+		priv->set_bits_locked(priv, ECON2, TXRST);
+		priv->clr_bits_locked(priv, ECON2, TXRST);
+	}
+
+	/* Clear pending TX interrupt flags */
+	priv->clr_bits_locked(priv, EIR, TXIF | TXABTIF);
+
+	/* Set the GP write pointer to the TX buffer start */
+	priv->write_reg_locked(priv, EGPWRPT, TX_BUF_START);
+
+	/* Copy packet data into TX SRAM */
+	priv->write_mem_locked(priv, WIN_GP, (u8 *)skb->data, skb->len);
+
+	/* Set TX start address and packet length */
+	priv->write_reg_locked(priv, ETXST, TX_BUF_START);
+	priv->write_reg_locked(priv, ETXLEN, skb->len);
+
+	/* Mark TX as in-flight and request hardware transmission */
+	priv->tx_running = 1;
+	priv->cmd_locked(priv, CMD_SETTXRTS);
+
+	priv->unlock(priv);
+
+	/* Free the skb immediately — TX completion IRQ handles stats/errors.
+	 * tx_buf_xmit->skb is intentionally NOT set in the direct-TX path so
+	 * that encx24j600_tx_complete() sees skb==NULL and uses priv->tx_len
+	 * for byte accounting instead of dereferencing a freed pointer.
+	 */
+	dev_kfree_skb(skb);
 
 	return NETDEV_TX_OK;
 }
@@ -917,6 +1025,28 @@ static const struct ethtool_ops encx24j600_ethtool_ops = {
 	.get_regs = encx24j600_get_regs,
 };
 
+static int encx24j600_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
+{
+	struct encx24j600_priv *priv = netdev_priv(dev);
+	struct bpf_prog *old_prog;
+
+	old_prog = xchg(&priv->xdp_prog, prog);
+	if (old_prog)
+		bpf_prog_put(old_prog);
+
+	return 0;
+}
+
+static int encx24j600_xdp(struct net_device *dev, struct netdev_bpf *xdp)
+{
+	switch (xdp->command) {
+	case XDP_SETUP_PROG:
+		return encx24j600_xdp_setup(dev, xdp->prog);
+	default:
+		return -EINVAL;
+	}
+}
+
 static const struct net_device_ops encx24j600_netdev_ops = {
 	.ndo_open = encx24j600_open,
 	.ndo_stop = encx24j600_stop,
@@ -925,6 +1055,7 @@ static const struct net_device_ops encx24j600_netdev_ops = {
 	.ndo_set_mac_address = encx24j600_set_mac_address,
 	.ndo_tx_timeout = encx24j600_tx_timeout,
 	.ndo_validate_addr = eth_validate_addr,
+	.ndo_bpf = encx24j600_xdp,
 };
 
 int encx24j600_probe(struct encx24j600_priv *priv)
@@ -969,7 +1100,6 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 	hw_addr = TX_BUF_START;
 	for (i = 0; i < TX_BUF_COUNT; i++) {
 		buf->priv = priv;
-		kthread_init_work(&buf->work, encx24j600_tx_proc);
 		buf->skb = NULL;
 
 		buf->hw_addr = hw_addr;
@@ -988,6 +1118,9 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 		ret = PTR_ERR(priv->kworker_task);
 		goto out_free;
 	}
+
+	/* Elevate IRQ kthread to FIFO scheduling to minimize RX latency */
+	sched_set_fifo(priv->kworker_task);
 
 	/* Get the MAC address from the chip */
 	encx24j600_hw_get_macaddr(priv, addr);

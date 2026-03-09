@@ -84,6 +84,13 @@ static u16 encx24j600_smi_read_reg(struct encx24j600_priv *priv, u8 reg)
 	return val;
 }
 
+static u16 encx24j600_smi_read_reg_locked(struct encx24j600_priv *priv, u8 reg)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
+
+	return read_reg(ctx->smi_inst, reg);
+}
+
 static void encx24j600_smi_write_reg(struct encx24j600_priv *priv, u8 reg, u16 val)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
@@ -91,6 +98,13 @@ static void encx24j600_smi_write_reg(struct encx24j600_priv *priv, u8 reg, u16 v
 	mutex_lock(&ctx->lock);
 	write_reg(ctx->smi_inst, reg, val);
 	mutex_unlock(&ctx->lock);
+}
+
+static void encx24j600_smi_write_reg_locked(struct encx24j600_priv *priv, u8 reg, u16 val)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
+
+	write_reg(ctx->smi_inst, reg, val);
 }
 
 static void encx24j600_smi_clr_bits(struct encx24j600_priv *priv, u8 reg, u16 mask)
@@ -102,6 +116,13 @@ static void encx24j600_smi_clr_bits(struct encx24j600_priv *priv, u8 reg, u16 ma
 	mutex_unlock(&ctx->lock);
 }
 
+static void encx24j600_smi_clr_bits_locked(struct encx24j600_priv *priv, u8 reg, u16 mask)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
+
+	write_reg(ctx->smi_inst, reg + CLR_OFFSET, mask);
+}
+
 static void encx24j600_smi_set_bits(struct encx24j600_priv *priv, u8 reg, u16 mask)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
@@ -111,111 +132,172 @@ static void encx24j600_smi_set_bits(struct encx24j600_priv *priv, u8 reg, u16 ma
 	mutex_unlock(&ctx->lock);
 }
 
+static void encx24j600_smi_set_bits_locked(struct encx24j600_priv *priv, u8 reg, u16 mask)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
+
+	write_reg(ctx->smi_inst, reg + SET_OFFSET, mask);
+}
+
+static void encx24j600_smi_cmd_nolock(struct encx24j600_smi_ctx *ctx,
+				      enum encx24j600_byte_cmd cmd)
+{
+	struct bcm2835_smi_instance *inst = ctx->smi_inst;
+
+	switch (cmd) {
+	case CMD_SETETHRST:
+		write_reg(inst, ECON2 + SET_OFFSET, ETHRST);
+		break;
+	case CMD_FCDISABLE:
+		write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
+		break;
+	case CMD_FCSINGLE:
+		write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
+		write_reg(inst, ECON1 + SET_OFFSET, FCOP0);
+		break;
+	case CMD_FCMULTIPLE:
+		write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
+		write_reg(inst, ECON1 + SET_OFFSET, FCOP1);
+		break;
+	case CMD_FCCLEAR:
+		write_reg(inst, ECON1 + SET_OFFSET, FCOP1 | FCOP0);
+		break;
+	case CMD_SETPKTDEC:
+		write_reg(inst, ECON1 + SET_OFFSET, PKTDEC);
+		break;
+	case CMD_DMASTOP:
+		write_reg(inst, ECON1 + CLR_OFFSET, DMAST);
+		break;
+	case CMD_DMACKSUM:
+		write_reg(inst, ECON1 + CLR_OFFSET, DMACPY | DMACSSD | DMANOCS);
+		write_reg(inst, ECON1 + SET_OFFSET, DMAST);
+		break;
+	case CMD_DMACKSUMS:
+		write_reg(inst, ECON1 + CLR_OFFSET, DMACPY | DMANOCS);
+		write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACSSD);
+		break;
+	case CMD_DMACOPY:
+		write_reg(inst, ECON1 + CLR_OFFSET, DMACSSD | DMANOCS);
+		write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACPY);
+		break;
+	case CMD_DMACOPYS:
+		write_reg(inst, ECON1 + CLR_OFFSET, DMANOCS);
+		write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACPY | DMACSSD);
+		break;
+	case CMD_SETTXRTS:
+		write_reg(inst, ECON1 + SET_OFFSET, TXRTS);
+		break;
+	case CMD_ENABLERX:
+		write_reg(inst, ECON1 + SET_OFFSET, RXEN);
+		break;
+	case CMD_DISABLERX:
+		write_reg(inst, ECON1 + CLR_OFFSET, RXEN);
+		break;
+	/*
+	 * Note: The SPI bus uses dedicated single-byte opcodes (SETEIE/
+	 * CLREIE) for interrupt enable/disable. Those opcodes are not
+	 * available on the PSP bus. We use the SET/CLR address regions
+	 * for ESTAT instead. Although the datasheet does not explicitly
+	 * document ESTAT SET/CLR access in PSP mode 5, this works because
+	 * INT (bit 15) is the only settable/clearable bit in ESTAT.
+	 * If interrupt enable/disable ever fails intermittently, this is
+	 * the first place to investigate.
+	 */
+	case CMD_SETEIE:
+		write_reg(inst, ESTAT + SET_OFFSET, INT);
+		break;
+	case CMD_CLREIE:
+		write_reg(inst, ESTAT + CLR_OFFSET, INT);
+		break;
+	default:
+		break;
+	}
+}
+
 static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byte_cmd cmd)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
-	struct bcm2835_smi_instance *inst = ctx->smi_inst;
 
 	mutex_lock(&ctx->lock);
-	switch(cmd) {
-		case CMD_SETETHRST:
-			write_reg(inst, ECON2 + SET_OFFSET, ETHRST);
-			break;
-		case CMD_FCDISABLE:
-			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
-			break;
-		case CMD_FCSINGLE:
-			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
-			write_reg(inst, ECON1 + SET_OFFSET, FCOP0);
-			break;
-		case CMD_FCMULTIPLE:
-			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
-			write_reg(inst, ECON1 + SET_OFFSET, FCOP1);
-			break;
-		case CMD_FCCLEAR:
-			write_reg(inst, ECON1 + SET_OFFSET, FCOP1 | FCOP0);
-			break;
-		case CMD_SETPKTDEC:
-			write_reg(inst, ECON1 + SET_OFFSET, PKTDEC);
-			break;
-		case CMD_DMASTOP:
-			write_reg(inst, ECON1 + CLR_OFFSET, DMAST);
-			break;
-		case CMD_DMACKSUM:
-			write_reg(inst, ECON1 + CLR_OFFSET, DMACPY | DMACSSD | DMANOCS);
-			write_reg(inst, ECON1 + SET_OFFSET, DMAST);
-			break;
-		case CMD_DMACKSUMS:
-			write_reg(inst, ECON1 + CLR_OFFSET, DMACPY | DMANOCS);
-			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACSSD);
-			break;
-		case CMD_DMACOPY:
-			write_reg(inst, ECON1 + CLR_OFFSET, DMACSSD | DMANOCS);
-			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACPY);
-			break;
-		case CMD_DMACOPYS:
-			write_reg(inst, ECON1 + CLR_OFFSET, DMANOCS);
-			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACPY | DMACSSD);
-			break;
-		case CMD_SETTXRTS:
-			write_reg(inst, ECON1 + SET_OFFSET, TXRTS);
-			break;
-		case CMD_ENABLERX:
-			write_reg(inst, ECON1 + SET_OFFSET, RXEN);
-			break;
-		case CMD_DISABLERX:
-			write_reg(inst, ECON1 + CLR_OFFSET, RXEN);
-			break;
-		/*
-		 * Note: The SPI bus uses dedicated single-byte opcodes (SETEIE/
-		 * CLREIE) for interrupt enable/disable. Those opcodes are not
-		 * available on the PSP bus. We use the SET/CLR address regions
-		 * for ESTAT instead. Although the datasheet does not explicitly
-		 * document ESTAT SET/CLR access in PSP mode 5, this works because
-		 * INT (bit 15) is the only settable/clearable bit in ESTAT.
-		 * If interrupt enable/disable ever fails intermittently, this is
-		 * the first place to investigate.
-		 */
-		case CMD_SETEIE:
-			write_reg(inst, ESTAT + SET_OFFSET, INT);
-			break;
-		case CMD_CLREIE:
-			write_reg(inst, ESTAT + CLR_OFFSET, INT);
-			break;
-		default:
-			break;
-	}
+	encx24j600_smi_cmd_nolock(ctx, cmd);
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
+static void encx24j600_smi_cmd_locked(struct encx24j600_priv *priv, enum encx24j600_byte_cmd cmd)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
-	struct bcm2835_smi_instance *inst = ctx->smi_inst;
 
-	mutex_lock(&ctx->lock);
+	encx24j600_smi_cmd_nolock(ctx, cmd);
+}
+
+static void encx24j600_smi_read_mem_nolock(struct encx24j600_smi_ctx *ctx,
+					   enum encx24j600_memwin win,
+					   u8 *data, size_t count)
+{
+	struct bcm2835_smi_instance *inst = ctx->smi_inst;
 
 	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
 	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_read_buf(inst, data, count);
+}
 
+static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
+
+	mutex_lock(&ctx->lock);
+	encx24j600_smi_read_mem_nolock(ctx, win, data, count);
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
+static void encx24j600_smi_read_mem_locked(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
-	struct bcm2835_smi_instance *inst = ctx->smi_inst;
 
-	mutex_lock(&ctx->lock);
+	encx24j600_smi_read_mem_nolock(ctx, win, data, count);
+}
+
+static void encx24j600_smi_write_mem_nolock(struct encx24j600_smi_ctx *ctx,
+					    enum encx24j600_memwin win,
+					    const u8 *data, size_t count)
+{
+	struct bcm2835_smi_instance *inst = ctx->smi_inst;
 
 	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
 	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_write_buf(inst, data, count);
+}
+
+static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
+
+	mutex_lock(&ctx->lock);
+	encx24j600_smi_write_mem_nolock(ctx, win, data, count);
+	mutex_unlock(&ctx->lock);
+}
+
+static void encx24j600_smi_write_mem_locked(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
+
+	encx24j600_smi_write_mem_nolock(ctx, win, data, count);
+}
+
+static void encx24j600_smi_lock(struct encx24j600_priv *priv)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
+
+	mutex_lock(&ctx->lock);
+}
+
+static void encx24j600_smi_unlock(struct encx24j600_priv *priv)
+{
+	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 
 	mutex_unlock(&ctx->lock);
 }
@@ -295,6 +377,15 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 	ctx->priv.cmd = encx24j600_smi_cmd;
 	ctx->priv.read_mem = encx24j600_smi_read_mem;
 	ctx->priv.write_mem = encx24j600_smi_write_mem;
+	ctx->priv.lock = encx24j600_smi_lock;
+	ctx->priv.unlock = encx24j600_smi_unlock;
+	ctx->priv.read_reg_locked = encx24j600_smi_read_reg_locked;
+	ctx->priv.write_reg_locked = encx24j600_smi_write_reg_locked;
+	ctx->priv.clr_bits_locked = encx24j600_smi_clr_bits_locked;
+	ctx->priv.set_bits_locked = encx24j600_smi_set_bits_locked;
+	ctx->priv.cmd_locked = encx24j600_smi_cmd_locked;
+	ctx->priv.read_mem_locked = encx24j600_smi_read_mem_locked;
+	ctx->priv.write_mem_locked = encx24j600_smi_write_mem_locked;
 
 	ret = encx24j600_probe(&ctx->priv);
 	if (ret) {
