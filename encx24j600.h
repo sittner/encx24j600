@@ -79,6 +79,8 @@ struct encx24j600_priv {
 	struct encx24j600_tx_buf *tx_buf_prep;
 	struct encx24j600_tx_buf *tx_buf_xmit;
 
+	u16 cached_eir;
+
 	u16 (*read_reg)(struct encx24j600_priv *priv, u8 reg);
 	void (*write_reg)(struct encx24j600_priv *priv, u8 reg, u16 val);
 	void (*clr_bits)(struct encx24j600_priv *priv, u8 reg, u16 mask);
