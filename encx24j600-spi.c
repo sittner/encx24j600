@@ -197,7 +197,7 @@ static void encx24j600_spi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_spi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 * data, size_t count)
+static void encx24j600_spi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
 {
 	struct encx24j600_spi_ctx *ctx = container_of(priv, struct encx24j600_spi_ctx, priv);
 	u8 op = memwin_ops[win].rop;
@@ -212,7 +212,7 @@ static void encx24j600_spi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_spi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 * data, size_t count)
+static void encx24j600_spi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
 {
 	struct encx24j600_spi_ctx *ctx = container_of(priv, struct encx24j600_spi_ctx, priv);
 	u8 op = memwin_ops[win].wop;

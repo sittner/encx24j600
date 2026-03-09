@@ -115,7 +115,6 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	u16 val;
 
 	mutex_lock(&ctx->lock);
 	switch(cmd) {
@@ -123,26 +122,18 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 			write_reg(inst, ECON2 + SET_OFFSET, ETHRST);
 			break;
 		case CMD_FCDISABLE:
-			val = read_reg(inst, ECON1);
-			val &= ~(FCOP1 | FCOP0);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
 			break;
 		case CMD_FCSINGLE:
-			val = read_reg(inst, ECON1);
-			val &= ~(FCOP1 | FCOP0);
-			val |= FCOP0;
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
+			write_reg(inst, ECON1 + SET_OFFSET, FCOP0);
 			break;
 		case CMD_FCMULTIPLE:
-			val = read_reg(inst, ECON1);
-			val &= ~(FCOP1 | FCOP0);
-			val |= FCOP1;
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, FCOP1 | FCOP0);
+			write_reg(inst, ECON1 + SET_OFFSET, FCOP1);
 			break;
 		case CMD_FCCLEAR:
-			val = read_reg(inst, ECON1);
-			val |= (FCOP1 | FCOP0);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + SET_OFFSET, FCOP1 | FCOP0);
 			break;
 		case CMD_SETPKTDEC:
 			write_reg(inst, ECON1 + SET_OFFSET, PKTDEC);
@@ -151,28 +142,20 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 			write_reg(inst, ECON1 + CLR_OFFSET, DMAST);
 			break;
 		case CMD_DMACKSUM:
-			val = read_reg(inst, ECON1);
-			val &= ~(DMAST | DMACPY | DMACSSD | DMANOCS);
-			val |= (DMAST);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, DMACPY | DMACSSD | DMANOCS);
+			write_reg(inst, ECON1 + SET_OFFSET, DMAST);
 			break;
 		case CMD_DMACKSUMS:
-			val = read_reg(inst, ECON1);
-			val &= ~(DMAST | DMACPY | DMACSSD | DMANOCS);
-			val |= (DMAST | DMACSSD);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, DMACPY | DMANOCS);
+			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACSSD);
 			break;
 		case CMD_DMACOPY:
-			val = read_reg(inst, ECON1);
-			val &= ~(DMAST | DMACPY | DMACSSD | DMANOCS);
-			val |= (DMAST | DMACPY);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, DMACSSD | DMANOCS);
+			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACPY);
 			break;
 		case CMD_DMACOPYS:
-			val = read_reg(inst, ECON1);
-			val &= ~(DMAST | DMACPY | DMACSSD | DMANOCS);
-			val |= (DMAST | DMACPY | DMACSSD);
-			write_reg(inst, ECON1, val);
+			write_reg(inst, ECON1 + CLR_OFFSET, DMANOCS);
+			write_reg(inst, ECON1 + SET_OFFSET, DMAST | DMACPY | DMACSSD);
 			break;
 		case CMD_SETTXRTS:
 			write_reg(inst, ECON1 + SET_OFFSET, TXRTS);
@@ -195,7 +178,7 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 * data, size_t count)
+static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
@@ -211,7 +194,7 @@ static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 	mutex_unlock(&ctx->lock);
 }
 
-static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 * data, size_t count)
+static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
@@ -231,7 +214,7 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 {
 	struct device_node *node, *smi_node;
 	struct bcm2835_smi_instance *smi_inst;
-	int irq;
+	int irq, ret;
 	struct smi_settings *smi_settings;
 	struct net_device *ndev;
 	struct encx24j600_smi_ctx *ctx;
@@ -250,6 +233,7 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 
 	/* Request use of SMI peripheral */
 	smi_inst = bcm2835_smi_get(smi_node);
+	of_node_put(smi_node);
 	if (!smi_inst) {
 		dev_err(&pdev->dev, "Could not register with SMI.");
 		return -EPROBE_DEFER;
@@ -275,7 +259,7 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 	smi_settings->write_setup_time = 2;
 	smi_settings->write_hold_time = 2;
 	smi_settings->write_pace_time = 5;
-	smi_settings->write_strobe_time = 2;
+	smi_settings->write_strobe_time = 4;
 
 	bcm2835_smi_set_regs_from_settings(smi_inst);
 
@@ -302,7 +286,13 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 	ctx->priv.read_mem = encx24j600_smi_read_mem;
 	ctx->priv.write_mem = encx24j600_smi_write_mem;
 
-	return encx24j600_probe(&ctx->priv);
+	ret = encx24j600_probe(&ctx->priv);
+	if (ret) {
+		free_netdev(ndev);
+		return ret;
+	}
+
+	return 0;
 }
 
 static int encx24j600_smi_remove(struct platform_device *pdev)
