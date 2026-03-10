@@ -276,7 +276,8 @@ static void encx24j600_hw_tx_start(struct encx24j600_priv *priv)
 	priv->cmd(priv, CMD_SETTXRTS);
 }
 
-static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
+static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err,
+				   struct sk_buff **skb_to_free, bool *wake_queue)
 {
 	struct net_device *dev = priv->ndev;
 	struct sk_buff *skb = priv->tx_buf_xmit->skb;
@@ -298,8 +299,10 @@ static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err)
 	priv->tx_pending--;
 
 	atomic_inc(&priv->tx_buf_free);
-	dev_kfree_skb_any(skb);
-	netif_wake_queue(dev);
+
+	/* Defer these operations — they can schedule on PREEMPT_RT */
+	*skb_to_free = skb;
+	*wake_queue = true;
 
 	encx24j600_hw_tx_start(priv);
 }
@@ -325,7 +328,7 @@ static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 	skb->dev = dev;
 	skb->protocol = eth_type_trans(skb, dev);
 
-	netif_rx(skb);
+	netif_receive_skb(skb);
 
 	/* Maintain stats */
 	dev->stats.rx_packets++;
@@ -397,6 +400,8 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 	    container_of(ws, struct encx24j600_priv, irq_work);
 
 	struct net_device *dev = priv->ndev;
+	struct sk_buff *skb_to_free = NULL;
+	bool wake_queue = false;
 	int eir;
 
 	eir = priv->read_reg(priv, EIR);
@@ -407,10 +412,8 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 		u8 packet_count;
 
 		packet_count = priv->read_reg(priv, ESTAT) & 0xff;
-		while (packet_count) {
+		if (packet_count)
 			encx24j600_rx_packets(priv, packet_count);
-			packet_count = priv->read_reg(priv, ESTAT) & 0xff;
-		}
 	}
 
 	if (eir & RXABTIF) {
@@ -424,13 +427,19 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 
 	/* Then TX complete (frees buffer, may trigger next TX) */
 	if (eir & TXABTIF)
-		encx24j600_tx_complete(priv, true);
+		encx24j600_tx_complete(priv, true, &skb_to_free, &wake_queue);
 	else if (eir & TXIF)
-		encx24j600_tx_complete(priv, false);
+		encx24j600_tx_complete(priv, false, &skb_to_free, &wake_queue);
 
 	/* LINK status is least time-critical */
 	if (eir & LINKIF)
 		encx24j600_int_link_handler(priv);
+
+	/* These operations can schedule on PREEMPT_RT */
+	if (skb_to_free)
+		dev_kfree_skb_any(skb_to_free);
+	if (wake_queue)
+		netif_wake_queue(dev);
 
 	enable_irq(dev->irq);
 }
@@ -755,8 +764,9 @@ static int encx24j600_stop(struct net_device *dev)
 	struct encx24j600_priv *priv = netdev_priv(dev);
 
 	netif_stop_queue(dev);
-	encx24j600_hw_disable(priv);
 	free_irq(dev->irq, priv);
+	kthread_flush_worker(&priv->kworker);
+	encx24j600_hw_disable(priv);
 	return 0;
 }
 
@@ -847,6 +857,15 @@ static netdev_tx_t encx24j600_tx(struct sk_buff *skb, struct net_device *dev)
 }
 
 /* Deal with a transmit timeout */
+static void encx24j600_tx_timeout_proc(struct kthread_work *ws)
+{
+	struct encx24j600_priv *priv =
+	    container_of(ws, struct encx24j600_priv, tx_timeout_work);
+
+	encx24j600_hw_init_tx(priv);
+	netif_wake_queue(priv->ndev);
+}
+
 static void encx24j600_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
@@ -855,8 +874,7 @@ static void encx24j600_tx_timeout(struct net_device *dev, unsigned int txqueue)
 		  jiffies, jiffies - dev_trans_start(dev));
 
 	dev->stats.tx_errors++;
-	encx24j600_hw_init_tx(priv);
-	netif_wake_queue(dev);
+	kthread_queue_work(&priv->kworker, &priv->tx_timeout_work);
 }
 
 static int encx24j600_get_regs_len(struct net_device *dev)
@@ -870,6 +888,8 @@ static void encx24j600_get_regs(struct net_device *dev,
 	struct encx24j600_priv *priv = netdev_priv(dev);
 	u16 *buff = p;
 	u8 reg;
+
+	kthread_flush_worker(&priv->kworker);
 
 	regs->version = 1;
 	for (reg = 0; reg < SFR_REG_COUNT; reg += 2) {
@@ -977,6 +997,7 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 	kthread_init_worker(&priv->kworker);
 	kthread_init_work(&priv->setrx_work, encx24j600_setrx_proc);
 	kthread_init_work(&priv->irq_work, encx24j600_irq_proc);
+	kthread_init_work(&priv->tx_timeout_work, encx24j600_tx_timeout_proc);
 
 	/* setup transmit buffer ring */
 	buf = priv->tx_buf;

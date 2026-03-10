@@ -63,6 +63,7 @@ struct encx24j600_priv {
 	struct kthread_worker kworker;
 	struct kthread_work setrx_work;
 	struct kthread_work irq_work;
+	struct kthread_work tx_timeout_work;
 	u16 next_packet;
 	bool hw_enabled;
 	bool full_duplex;

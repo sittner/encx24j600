@@ -70,7 +70,6 @@ struct encx24j600_spi_ctx {
 	struct encx24j600_priv priv;
 
 	struct spi_device *spi;
-	struct mutex lock;
 	int bank;
 };
 
@@ -129,16 +128,12 @@ static u16 encx24j600_spi_read_reg(struct encx24j600_priv *priv, u8 reg)
 				{ .rx_buf = &val, .len = 2 },
 			};
 
-			mutex_lock(&ctx->lock);
 			spi_sync_transfer(ctx->spi, xfers, 2);
-			mutex_unlock(&ctx->lock);
 			return le16_to_cpu(val);
 		}
 	}
 
-	mutex_lock(&ctx->lock);
 	val = spi_xfer_nbyte(ctx, reg, RCR, RCRU, 0);
-	mutex_unlock(&ctx->lock);
 	return le16_to_cpu(val);
 }
 
@@ -157,34 +152,26 @@ static void encx24j600_spi_write_reg(struct encx24j600_priv *priv, u8 reg, u16 v
 				{ .tx_buf = &val, .len = 2 },
 			};
 
-			mutex_lock(&ctx->lock);
 			spi_sync_transfer(ctx->spi, xfers, 2);
-			mutex_unlock(&ctx->lock);
 			return;
 		}
 	}
 
-	mutex_lock(&ctx->lock);
 	spi_xfer_nbyte(ctx, reg, WCR, WCRU, val);
-	mutex_unlock(&ctx->lock);
 }
 
 static void encx24j600_spi_clr_bits(struct encx24j600_priv *priv, u8 reg, u16 mask)
 {
 	struct encx24j600_spi_ctx *ctx = container_of(priv, struct encx24j600_spi_ctx, priv);
 
-	mutex_lock(&ctx->lock);
 	spi_xfer_nbyte(ctx, reg, BFC, BFCU, cpu_to_le16(mask));
-	mutex_unlock(&ctx->lock);
 }
 
 static void encx24j600_spi_set_bits(struct encx24j600_priv *priv, u8 reg, u16 mask)
 {
 	struct encx24j600_spi_ctx *ctx = container_of(priv, struct encx24j600_spi_ctx, priv);
 
-	mutex_lock(&ctx->lock);
 	spi_xfer_nbyte(ctx, reg, BFS, BFSU, cpu_to_le16(mask));
-	mutex_unlock(&ctx->lock);
 }
 
 static void encx24j600_spi_cmd(struct encx24j600_priv *priv, enum encx24j600_byte_cmd cmd)
@@ -192,9 +179,7 @@ static void encx24j600_spi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 	struct encx24j600_spi_ctx *ctx = container_of(priv, struct encx24j600_spi_ctx, priv);
 	u8 op = cmd_ops[cmd];
 
-	mutex_lock(&ctx->lock);
 	spi_write(ctx->spi, &op, 1);
-	mutex_unlock(&ctx->lock);
 }
 
 static void encx24j600_spi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
@@ -207,9 +192,7 @@ static void encx24j600_spi_read_mem(struct encx24j600_priv *priv, enum encx24j60
 		{ .rx_buf = data, .len = count },
 	};
 
-	mutex_lock(&ctx->lock);
 	spi_sync_transfer(ctx->spi, xfers, 2);
-	mutex_unlock(&ctx->lock);
 }
 
 static void encx24j600_spi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
@@ -222,9 +205,7 @@ static void encx24j600_spi_write_mem(struct encx24j600_priv *priv, enum encx24j6
 		{ .tx_buf = data, .len = count },
 	};
 
-	mutex_lock(&ctx->lock);
 	spi_sync_transfer(ctx->spi, xfers, 2);
-	mutex_unlock(&ctx->lock);
 }
 
 static int encx24j600_spi_probe(struct spi_device *spi)
@@ -246,8 +227,6 @@ static int encx24j600_spi_probe(struct spi_device *spi)
 
 	SET_NETDEV_DEV(ndev, &spi->dev);
 	ndev->irq = spi->irq;
-
-	mutex_init(&ctx->lock);
 
 	ctx->priv.read_reg = encx24j600_spi_read_reg;
 	ctx->priv.write_reg = encx24j600_spi_write_reg;
