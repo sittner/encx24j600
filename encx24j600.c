@@ -80,8 +80,6 @@ static u16 encx24j600_read_phy(struct encx24j600_priv *priv, u8 reg)
 	unsigned long timeout;
 	u16 val;
 
-	mutex_lock(&priv->phy_lock);
-
 	/* Set the right address and start the register read operation */
 	priv->write_reg(priv, MIREGADR, MIREGADR_VAL | (reg & PHREG_MASK));
 	priv->write_reg(priv, MICMD, MIIRD);
@@ -94,7 +92,6 @@ static u16 encx24j600_read_phy(struct encx24j600_priv *priv, u8 reg)
 	while(priv->read_reg(priv, MISTAT) & BUSY) {
 		if (time_after(jiffies, timeout)) {
 			netdev_warn(priv->ndev, "PHY read timeout for reg 0x%02x\n", reg);
-			mutex_unlock(&priv->phy_lock);
 			return 0;
 		}
 		cpu_relax();
@@ -106,15 +103,12 @@ static u16 encx24j600_read_phy(struct encx24j600_priv *priv, u8 reg)
 	/* Obtain results and return */
 	val = priv->read_reg(priv, MIRD);
 
-	mutex_unlock(&priv->phy_lock);
 	return val;
 }
 
 static void encx24j600_write_phy(struct encx24j600_priv *priv, u8 reg, u16 val)
 {
 	unsigned long timeout;
-
-	mutex_lock(&priv->phy_lock);
 
 	/* Write the register address */
 	priv->write_reg(priv, MIREGADR,  MIREGADR_VAL | (reg & PHREG_MASK));
@@ -128,13 +122,10 @@ static void encx24j600_write_phy(struct encx24j600_priv *priv, u8 reg, u16 val)
 	while(priv->read_reg(priv, MISTAT) & BUSY) {
 		if (time_after(jiffies, timeout)) {
 			netdev_warn(priv->ndev, "PHY write timeout for reg 0x%02x\n", reg);
-			mutex_unlock(&priv->phy_lock);
 			return;
 		}
 		cpu_relax();
 	}
-
-	mutex_unlock(&priv->phy_lock);
 }
 
 static void encx24j600_update_phcon1(struct encx24j600_priv *priv)
@@ -307,19 +298,86 @@ static void encx24j600_tx_complete(struct encx24j600_priv *priv, bool err,
 	encx24j600_hw_tx_start(priv);
 }
 
+/*
+ * Lock-free SPSC RX SKB preallocation pool.
+ *
+ * Consumer (RT kworker, encx24j600_receive_packet): reads head, writes tail.
+ * Producer (rx_refill_work, SCHED_NORMAL): reads tail, writes head.
+ *
+ * smp_load_acquire / smp_store_release ensure the SKB pointer writes are
+ * visible before the index update that signals slot availability.
+ */
+static struct sk_buff *encx24j600_rx_skb_get(struct encx24j600_priv *priv)
+{
+	unsigned int head = smp_load_acquire(&priv->rx_skb_pool_head);
+	unsigned int tail = priv->rx_skb_pool_tail;
+	struct sk_buff *skb;
+
+	if (head == tail)
+		return NULL; /* pool empty */
+
+	skb = priv->rx_skb_pool[tail % RX_SKB_POOL_SIZE];
+	priv->rx_skb_pool[tail % RX_SKB_POOL_SIZE] = NULL;
+	smp_store_release(&priv->rx_skb_pool_tail, tail + 1);
+	return skb;
+}
+
+static bool encx24j600_rx_skb_put(struct encx24j600_priv *priv,
+				   struct sk_buff *skb)
+{
+	unsigned int head = priv->rx_skb_pool_head;
+	unsigned int tail = smp_load_acquire(&priv->rx_skb_pool_tail);
+
+	if (head - tail >= RX_SKB_POOL_SIZE)
+		return false; /* pool full */
+
+	priv->rx_skb_pool[head % RX_SKB_POOL_SIZE] = skb;
+	smp_store_release(&priv->rx_skb_pool_head, head + 1);
+	return true;
+}
+
+static void encx24j600_rx_refill_work_fn(struct work_struct *ws)
+{
+	struct encx24j600_priv *priv =
+	    container_of(ws, struct encx24j600_priv, rx_refill_work);
+
+	while (priv->rx_skb_pool_head -
+	       smp_load_acquire(&priv->rx_skb_pool_tail) < RX_SKB_POOL_SIZE) {
+		struct sk_buff *skb;
+
+		skb = netdev_alloc_skb(priv->ndev, MAX_FRAMELEN + NET_IP_ALIGN);
+		if (!skb)
+			break; /* OOM, try again on next refill trigger */
+
+		skb_reserve(skb, NET_IP_ALIGN);
+		encx24j600_rx_skb_put(priv, skb);
+	}
+}
+
 static int encx24j600_receive_packet(struct encx24j600_priv *priv,
 				     struct rsv *rsv)
 {
 	struct net_device *dev = priv->ndev;
 	struct sk_buff *skb;
 
-	skb = netdev_alloc_skb(dev, rsv->len + NET_IP_ALIGN);
+	skb = encx24j600_rx_skb_get(priv);
 	if (!skb) {
-		pr_err_ratelimited("RX: OOM: packet dropped\n");
-		dev->stats.rx_dropped++;
-		return -ENOMEM;
+		/* Pool underrun — fall back to inline allocation.
+		 * This accepts a jitter hit but avoids packet loss.
+		 */
+		priv->rx_pool_underruns++;
+		if (net_ratelimit())
+			netif_warn(priv, rx_err, dev,
+				   "RX pool underrun (fallback to alloc)\n");
+		skb = netdev_alloc_skb(dev, rsv->len + NET_IP_ALIGN);
+		if (!skb) {
+			pr_err_ratelimited("RX: OOM: packet dropped\n");
+			dev->stats.rx_dropped++;
+			return -ENOMEM;
+		}
+		skb_reserve(skb, NET_IP_ALIGN);
 	}
-	skb_reserve(skb, NET_IP_ALIGN);
+
 	priv->read_mem(priv, WIN_RX, skb_put(skb, rsv->len), rsv->len);
 
 	if (netif_msg_pktdata(priv))
@@ -415,6 +473,11 @@ static void encx24j600_irq_proc(struct kthread_work *ws)
 		if (packet_count)
 			encx24j600_rx_packets(priv, packet_count);
 	}
+
+	/* Trigger async refill of the prealloc pool at SCHED_NORMAL priority */
+	if (priv->rx_skb_pool_head -
+	    smp_load_acquire(&priv->rx_skb_pool_tail) < RX_SKB_POOL_SIZE)
+		schedule_work(&priv->rx_refill_work);
 
 	if (eir & RXABTIF) {
 		if (eir & PCFULIF) {
@@ -742,14 +805,44 @@ static int encx24j600_open(struct net_device *dev)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
 	int ret;
+	int i;
 
 	encx24j600_hw_disable(priv);
 	encx24j600_hw_init(priv);
 
+	/* Pre-fill the RX SKB pool before enabling interrupts */
+	for (i = 0; i < RX_SKB_POOL_SIZE; i++) {
+		struct sk_buff *skb;
+
+		skb = netdev_alloc_skb(dev, MAX_FRAMELEN + NET_IP_ALIGN);
+		if (!skb) {
+			netdev_warn(dev, "RX pool pre-fill incomplete (%d/%d SKBs)\n",
+				    i, RX_SKB_POOL_SIZE);
+			break;
+		}
+		skb_reserve(skb, NET_IP_ALIGN);
+		encx24j600_rx_skb_put(priv, skb);
+	}
+
 	ret = request_irq(dev->irq, encx24j600_irq, IRQF_TRIGGER_LOW, DRV_NAME, priv);
 	if (unlikely(ret < 0)) {
+		unsigned int tail;
+
 		netdev_err(dev, "request irq %d failed (ret = %d)\n",
 			   dev->irq, ret);
+
+		/* Free pool SKBs allocated above */
+		tail = priv->rx_skb_pool_tail;
+		while (tail != priv->rx_skb_pool_head) {
+			struct sk_buff *skb =
+			    priv->rx_skb_pool[tail % RX_SKB_POOL_SIZE];
+
+			if (skb)
+				dev_kfree_skb(skb);
+			tail++;
+		}
+		priv->rx_skb_pool_head = 0;
+		priv->rx_skb_pool_tail = 0;
 		return ret;
 	}
 
@@ -762,11 +855,27 @@ static int encx24j600_open(struct net_device *dev)
 static int encx24j600_stop(struct net_device *dev)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
+	unsigned int tail;
 
 	netif_stop_queue(dev);
 	free_irq(dev->irq, priv);
 	kthread_flush_worker(&priv->kworker);
 	encx24j600_hw_disable(priv);
+
+	/* Cancel the refill work and drain any remaining SKBs from the pool */
+	cancel_work_sync(&priv->rx_refill_work);
+
+	tail = priv->rx_skb_pool_tail;
+	while (tail != priv->rx_skb_pool_head) {
+		struct sk_buff *skb = priv->rx_skb_pool[tail % RX_SKB_POOL_SIZE];
+
+		if (skb)
+			dev_kfree_skb(skb);
+		tail++;
+	}
+	priv->rx_skb_pool_head = 0;
+	priv->rx_skb_pool_tail = 0;
+
 	return 0;
 }
 
@@ -981,7 +1090,11 @@ int encx24j600_probe(struct encx24j600_priv *priv)
 
 	priv->ndev->netdev_ops = &encx24j600_netdev_ops;
 
-	mutex_init(&priv->phy_lock);
+	/* Initialize RX SKB pool */
+	INIT_WORK(&priv->rx_refill_work, encx24j600_rx_refill_work_fn);
+	priv->rx_skb_pool_head = 0;
+	priv->rx_skb_pool_tail = 0;
+	priv->rx_pool_underruns = 0;
 
 	/* Reset device and check if it is connected */
 	if (encx24j600_soft_reset(priv)) {
