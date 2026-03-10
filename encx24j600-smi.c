@@ -35,7 +35,6 @@ struct encx24j600_smi_ctx {
 	struct encx24j600_priv priv;
 
 	struct bcm2835_smi_instance *smi_inst;
-	spinlock_t lock;
 };
 
 static inline void select_reg(struct bcm2835_smi_instance *inst, u16 reg)
@@ -77,52 +76,36 @@ static u16 read_reg(struct bcm2835_smi_instance *inst, u16 reg)
 static u16 encx24j600_smi_read_reg(struct encx24j600_priv *priv, u8 reg)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
-	unsigned long flags;
-	u16 val = 0;
 
-	spin_lock_irqsave(&ctx->lock, flags);
-	val = read_reg(ctx->smi_inst, reg);
-	spin_unlock_irqrestore(&ctx->lock, flags);
-	return val;
+	return read_reg(ctx->smi_inst, reg);
 }
 
 static void encx24j600_smi_write_reg(struct encx24j600_priv *priv, u8 reg, u16 val)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
-	unsigned long flags;
 
-	spin_lock_irqsave(&ctx->lock, flags);
 	write_reg(ctx->smi_inst, reg, val);
-	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static void encx24j600_smi_clr_bits(struct encx24j600_priv *priv, u8 reg, u16 mask)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
-	unsigned long flags;
 
-	spin_lock_irqsave(&ctx->lock, flags);
 	write_reg(ctx->smi_inst, reg + CLR_OFFSET, mask);
-	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static void encx24j600_smi_set_bits(struct encx24j600_priv *priv, u8 reg, u16 mask)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
-	unsigned long flags;
 
-	spin_lock_irqsave(&ctx->lock, flags);
 	write_reg(ctx->smi_inst, reg + SET_OFFSET, mask);
-	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byte_cmd cmd)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	unsigned long flags;
 
-	spin_lock_irqsave(&ctx->lock, flags);
 	switch(cmd) {
 		case CMD_SETETHRST:
 			write_reg(inst, ECON2 + SET_OFFSET, ETHRST);
@@ -191,41 +174,30 @@ static void encx24j600_smi_cmd(struct encx24j600_priv *priv, enum encx24j600_byt
 		default:
 			break;
 	}
-	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static void encx24j600_smi_read_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, u8 *data, size_t count)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	unsigned long flags;
-
-	spin_lock_irqsave(&ctx->lock, flags);
 
 	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
 	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_read_buf(inst, data, count);
-
-	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static void encx24j600_smi_write_mem(struct encx24j600_priv *priv, enum encx24j600_memwin win, const u8 *data, size_t count)
 {
 	struct encx24j600_smi_ctx *ctx = container_of(priv, struct encx24j600_smi_ctx, priv);
 	struct bcm2835_smi_instance *inst = ctx->smi_inst;
-	unsigned long flags;
-
-	spin_lock_irqsave(&ctx->lock, flags);
 
 	/* select window */
 	select_reg(inst, memwin_regs[win]);
 
 	/* transfer data (use 8 bit mode) */
 	bcm2835_smi_write_buf(inst, data, count);
-
-	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static int encx24j600_smi_probe(struct platform_device *pdev)
@@ -294,7 +266,6 @@ static int encx24j600_smi_probe(struct platform_device *pdev)
 	SET_NETDEV_DEV(ndev, &pdev->dev);
 	ndev->irq = irq;
 	ctx->smi_inst = smi_inst;
-	spin_lock_init(&ctx->lock);
 
 	ctx->priv.read_reg = encx24j600_smi_read_reg;
 	ctx->priv.write_reg = encx24j600_smi_write_reg;
