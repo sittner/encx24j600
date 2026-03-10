@@ -373,6 +373,9 @@
 #define TX_BUF_START 0x0000U
 #define RX_BUF_START (TX_BUF_SIZE * TX_BUF_COUNT)
 
+/* Number of preallocated RX SKBs in the lock-free SPSC pool */
+#define RX_SKB_POOL_SIZE 32
+
 /* Put RX buffer at 0 as suggested by the Errata datasheet ??? */
 
 /* Start of the general purpose area in sram */

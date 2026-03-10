@@ -15,6 +15,7 @@
 #include <linux/etherdevice.h>
 #include <linux/interrupt.h>
 #include <linux/atomic.h>
+#include <linux/workqueue.h>
 
 #include "encx24j600_hw.h"
 
@@ -58,7 +59,6 @@ struct encx24j600_tx_buf {
 
 struct encx24j600_priv {
 	struct net_device *ndev;
-	struct mutex phy_lock;
 	struct task_struct *kworker_task;
 	struct kthread_worker kworker;
 	struct kthread_work setrx_work;
@@ -81,6 +81,16 @@ struct encx24j600_priv {
 	struct encx24j600_tx_buf *tx_buf_xmit;
 
 	u16 cached_eir;
+
+	/* Lock-free SPSC RX SKB preallocation pool.
+	 * Producer (rx_refill_work, SCHED_NORMAL) writes head.
+	 * Consumer (RT kworker IRQ handler) writes tail.
+	 */
+	struct sk_buff *rx_skb_pool[RX_SKB_POOL_SIZE];
+	unsigned int rx_skb_pool_head;
+	unsigned int rx_skb_pool_tail;
+	struct work_struct rx_refill_work;
+	unsigned long rx_pool_underruns;
 
 	u16 (*read_reg)(struct encx24j600_priv *priv, u8 reg);
 	void (*write_reg)(struct encx24j600_priv *priv, u8 reg, u16 val);
